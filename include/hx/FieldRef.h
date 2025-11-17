@@ -1,6 +1,9 @@
 #ifndef HX_FIELD_REF_H
 #define HX_FIELD_REF_H
 
+#include <hx/GC.h>
+#include <hx/GcTypeInference.h>
+
 namespace hx
 {
 
@@ -40,7 +43,9 @@ public:
 
    hx::Val operator=(const hx::Val &inRHS)
    {
-      return mObject->__SetField(mName,inRHS, HX_PROP_DYNAMIC );
+      hx::Val r = mObject->__SetField(mName,inRHS, HX_PROP_DYNAMIC );
+      HX_OBJ_WB_GET(mObject, hx::PointerOf(Dynamic(inRHS)));
+      return r;
    }
    inline operator hx::Val() const { return mObject ? mObject->__Field(mName, HX_PROP_DYNAMIC) : null(); }
    inline operator Dynamic() const { return mObject ? Dynamic(mObject->__Field(mName, HX_PROP_DYNAMIC)) : null(); }
@@ -158,7 +163,9 @@ public:
 
    Dynamic operator=(const Dynamic &inRHS)
    {
-      return mObject->__SetItem(mIndex,inRHS);
+      Dynamic r = mObject->__SetItem(mIndex,inRHS);
+      HX_OBJ_WB_GET(mObject, hx::PointerOf((Dynamic)inRHS));
+      return r;
    }
    inline operator Dynamic() const { return mObject->__GetItem(mIndex); }
    inline operator double() const { return mObject->__GetItem(mIndex); }

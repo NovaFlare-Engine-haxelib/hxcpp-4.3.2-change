@@ -123,6 +123,37 @@ static size_t sgMaximumFreeSpace  = 1024*1024*1024;
 #endif
 
 
+/* moved below MAX_GC_THREADS */
+
+static int gMaxPauseMillis = 3;
+static int ReadEnvInt(const char *name,int def)
+{
+   const char *v = getenv(name);
+   if (!v || !*v) return def;
+   int n = atoi(v);
+   return n<=0 ? def : n;
+}
+static int ReadEnvBool(const char *name,int def)
+{
+   const char *v = getenv(name);
+   if (!v) return def;
+   if (v[0]=='0') return 0;
+   return 1;
+}
+
+static long long ReadEnvLL(const char *name,long long def)
+{
+   const char *v = getenv(name);
+   if (!v || !*v) return def;
+   #if defined(_MSC_VER)
+   long long n = _strtoi64(v, 0, 10);
+   #else
+   long long n = strtoll(v, 0, 10);
+   #endif
+   return n<=0 ? def : n;
+}
+
+// GCConfig moved below MAX_GC_THREADS and thread config definitions
 // #define HXCPP_GC_DEBUG_LEVEL 1
 
 #if HXCPP_GC_DEBUG_LEVEL>1
@@ -209,6 +240,44 @@ static bool sGcVerifyGenerational = false;
   enum { MAX_GC_THREADS = 8 };
 #endif
 
+#ifdef HX_WINDOWS
+static int hxGetCpuCores()
+{
+   SYSTEM_INFO si;
+   GetSystemInfo(&si);
+   int n = (int)si.dwNumberOfProcessors;
+   return n>0 ? n : 1;
+}
+#elif defined(HX_LINUX) || defined(HX_ANDROID) || defined(HX_MACOS) || defined(HX_IOS)
+static int hxGetCpuCores()
+{
+   long n = sysconf(
+   #if defined(_SC_NPROCESSORS_ONLN)
+      _SC_NPROCESSORS_ONLN
+   #else
+      -1
+   #endif
+   );
+   if (n<=0) n = 1;
+   return (int)n;
+}
+#else
+static int hxGetCpuCores() { return 1; }
+#endif
+
+static int gGcDesiredThreads = 1;
+static int gGcBackgroundThreads = 1;
+static void InitGcThreadConfig()
+{
+   int cores = hxGetCpuCores();
+   if (cores<1) cores = 1;
+   if (cores>(int)MAX_GC_THREADS) cores = (int)MAX_GC_THREADS;
+   gGcDesiredThreads = cores;
+   int bg = cores/2;
+   if (bg<1) bg = 1;
+   if (bg>(int)MAX_GC_THREADS) bg = (int)MAX_GC_THREADS;
+   gGcBackgroundThreads = bg;
+}
 #if (MAX_GC_THREADS>1)
    // You can uncomment this for better call stacks if it crashes while collecting
    #define HX_MULTI_THREAD_MARKING
@@ -227,6 +296,61 @@ static int sThreadZeroPokes = 0;
 static int sThreadBlockZeroCount = 0;
 static volatile int sThreadZeroMisses = 0;
 #endif
+
+namespace hx {
+struct GCConfig { int useG1; int regionSizeMB; int newSizePercent; int maxNewSizePercent; int maxPauseMillis; int parallelGcThreads; int concGcThreads; int concRefinementThreads; int parallelRefProcEnabled; };
+static GCConfig gGcConfig = {0,4,30,60,200,0,0,0,1};
+void SetGCConfig(const GCConfig &c)
+{
+   gGcConfig = c;
+   if (c.parallelGcThreads>0)
+   {
+      int t = c.parallelGcThreads;
+      if (t>(int)MAX_GC_THREADS) t = (int)MAX_GC_THREADS;
+      gGcDesiredThreads = t;
+   }
+   if (c.concRefinementThreads>0)
+   {
+      int b = c.concRefinementThreads;
+      if (b>(int)MAX_GC_THREADS) b = (int)MAX_GC_THREADS;
+      gGcBackgroundThreads = b;
+   }
+   if (c.maxPauseMillis>0)
+      gMaxPauseMillis = c.maxPauseMillis;
+}
+GCConfig GetGCConfig() { return gGcConfig; }
+}
+
+extern "C" {
+void __hxcpp_gc_set_threads(int parallelThreads, int refineThreads)
+{
+   hx::GCConfig cfg = hx::GetGCConfig();
+   if (parallelThreads>0) cfg.parallelGcThreads = parallelThreads;
+   if (refineThreads>0) cfg.concRefinementThreads = refineThreads;
+   hx::SetGCConfig(cfg);
+}
+void __hxcpp_gc_set_max_pause_ms(int ms)
+{
+   if (ms>0)
+   {
+      hx::GCConfig cfg = hx::GetGCConfig();
+      cfg.maxPauseMillis = ms;
+      hx::SetGCConfig(cfg);
+   }
+}
+
+static int sForceSuspendSafepoint = 0;
+void __hxcpp_gc_aggressive_safepoint(int enable)
+{
+   sForceSuspendSafepoint = enable ? 1 : 0;
+}
+void __hxcpp_gc_enable_parallel_ref_proc(int enable)
+{
+   hx::GCConfig cfg = hx::GetGCConfig();
+   cfg.parallelRefProcEnabled = enable?1:0;
+   hx::SetGCConfig(cfg);
+}
+}
 
 enum { MARK_BYTE_MASK = 0x0f };
 enum { FULL_MARK_BYTE_MASK = 0x3f };
@@ -340,6 +464,23 @@ struct ProfileCollectSummary
       if (dt>maxStall)
          maxStall = dt;
       totalCollecting += dt;
+      if (gMaxPauseMillis>0)
+      {
+         double ms = dt*1000.0;
+         if (ms>gMaxPauseMillis)
+         {
+            spaceFactor += 0.5;
+            if (spaceFactor>5.0) spaceFactor = 5.0;
+         }
+         else
+         {
+            if (spaceFactor>1.0)
+            {
+               spaceFactor -= 0.2;
+               if (spaceFactor<1.0) spaceFactor = 1.0;
+            }
+         }
+      }
       #ifdef HXCPP_GC_DYNAMIC_SIZE
       double wholeTime = now - lastTime;
       if (wholeTime)
@@ -4270,7 +4411,7 @@ public:
       else if (MAX_GC_THREADS>1 && inMultithread && mAllBlocks.size())
       {
          sThreadVisitContext = inCtx;
-         StartThreadJobs(tpjVisitBlocks, mAllBlocks.size(), true);
+         StartThreadJobs(tpjVisitBlocks, mAllBlocks.size(), true, gGcDesiredThreads);
          sThreadVisitContext = 0;
       }
       else
@@ -4803,7 +4944,7 @@ public:
          mMarker.releaseJobs();
 
          // Unleash the workers...
-         StartThreadJobs(tpjMark, MAX_GC_THREADS, true);
+         StartThreadJobs(tpjMark, MAX_GC_THREADS, true, gGcDesiredThreads);
       #else
          mMarker.processMarkStack();
       #endif
@@ -5425,7 +5566,7 @@ public:
       {
          for(int i=0;i<MAX_GC_THREADS;i++)
             sThreadBlockDataStats[i].clear();
-         StartThreadJobs(full ? tpjReclaimFull : tpjReclaim, mAllBlocks.size(), true);
+         StartThreadJobs(full ? tpjReclaimFull : tpjReclaim, mAllBlocks.size(), true, gGcDesiredThreads);
          outStats = sThreadBlockDataStats[0];
          for(int i=1;i<MAX_GC_THREADS;i++)
             outStats.add(sThreadBlockDataStats[i]);
@@ -5450,7 +5591,7 @@ public:
       {
          for(int i=0;i<MAX_GC_THREADS;i++)
             sThreadBlockDataStats[i].clear();
-         StartThreadJobs(tpjCountRows, mAllBlocks.size(), true);
+         StartThreadJobs(tpjCountRows, mAllBlocks.size(), true, gGcDesiredThreads);
          outStats = sThreadBlockDataStats[0];
          for(int i=1;i<MAX_GC_THREADS;i++)
             outStats.add(sThreadBlockDataStats[i]);
@@ -5509,7 +5650,7 @@ public:
       mZeroList.setSize(mFreeBlocks.size());
       memcpy( &mZeroList[0], &mFreeBlocks[0], mFreeBlocks.size()*sizeof(void *));
 
-      StartThreadJobs(tpjAsyncZero, mZeroList.size(),true);
+      StartThreadJobs(tpjAsyncZero, mZeroList.size(), true, gGcBackgroundThreads);
       #else
       if ( MAX_GC_THREADS>1 && mFreeBlocks.size()>4)
       {
@@ -5518,7 +5659,7 @@ public:
 
          // Only use one thread for parallel zeroing.  Try to get though the work wihout
          //  slowing down the main thread
-         StartThreadJobs(inJit ? tpjAsyncZeroJit : tpjAsyncZero, mZeroList.size(), false, 1);
+         StartThreadJobs(inJit ? tpjAsyncZeroJit : tpjAsyncZero, mZeroList.size(), false, gGcBackgroundThreads);
       }
       #endif
    }
@@ -6164,11 +6305,44 @@ public:
       __attribute__((no_sanitize("thread")))
      #endif
    #endif
-   void WaitForSafe()
-   {
+  void WaitForSafe()
+  {
       #ifndef HXCPP_SINGLE_THREADED_APP
       if (!mGCFreeZone)
       {
+         if (sForceSuspendSafepoint)
+         {
+            #ifdef HX_WINDOWS
+            HANDLE hThread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT, FALSE, mID);
+            if (hThread)
+            {
+               if (SuspendThread(hThread) != (DWORD)-1)
+               {
+                  CONTEXT ctx;
+                  memset(&ctx, 0, sizeof(ctx));
+                  #if defined(_M_X64)
+                  ctx.ContextFlags = CONTEXT_CONTROL;
+                  if (GetThreadContext(hThread, &ctx))
+                  {
+                     int *bottom = (int *)(ctx.Rsp);
+                     mBottomOfStack = bottom;
+                  }
+                  #else
+                  ctx.ContextFlags = CONTEXT_CONTROL;
+                  if (GetThreadContext(hThread, &ctx))
+                  {
+                     int *bottom = (int *)(ctx.Esp);
+                     mBottomOfStack = bottom;
+                  }
+                  #endif
+                  ResumeThread(hThread);
+               }
+               CloseHandle(hThread);
+               mReadyForCollect.Set();
+               return;
+            }
+            #endif
+         }
          // Cause allocation routines to fail ...
          mMoreHoles = false;
          #ifdef HXCPP_GC_NURSERY
@@ -6179,7 +6353,7 @@ public:
          mReadyForCollect.Wait();
       }
       #endif
-   }
+  }
 
    void ReleaseFromSafe()
    {
@@ -6599,6 +6773,22 @@ void InitAlloc()
 
    hx::CommonInitAlloc();
    sgAllocInit = true;
+   InitGcThreadConfig();
+   {
+      int cores = hxGetCpuCores();
+      int pg = ReadEnvInt("HX_GC_PARALLEL_THREADS", cores);
+      int rt = ReadEnvInt("HX_GC_REFINE_THREADS", cores/2);
+      int mp = ReadEnvInt("HX_GC_MAX_PAUSE_MS", 3);
+      int pr = ReadEnvBool("HX_GC_PARALLEL_REF_PROC", 1);
+      int fs = ReadEnvBool("HX_GC_FORCE_SUSPEND", 0);
+      hx::GCConfig cfg = hx::GetGCConfig();
+      cfg.parallelGcThreads = pg;
+      cfg.concRefinementThreads = rt;
+      cfg.maxPauseMillis = mp;
+      cfg.parallelRefProcEnabled = pr;
+      hx::SetGCConfig(cfg);
+      sForceSuspendSafepoint = fs;
+   }
    sGlobalAlloc = new GlobalAllocator();
    sgFinalizers = new FinalizerList();
    sFinalizerLock = new HxMutex();
