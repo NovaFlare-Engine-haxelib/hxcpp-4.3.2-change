@@ -44,7 +44,8 @@ public:
    hx::Val operator=(const hx::Val &inRHS)
    {
       hx::Val r = mObject->__SetField(mName,inRHS, HX_PROP_DYNAMIC );
-      HX_OBJ_WB_GET(mObject, hx::PointerOf(Dynamic(inRHS)));
+      Dynamic tmp(inRHS);
+      HX_OBJ_WB_GET(mObject, hx::PointerOf(tmp));
       return r;
    }
    inline operator hx::Val() const { return mObject ? mObject->__Field(mName, HX_PROP_DYNAMIC) : null(); }
@@ -164,7 +165,7 @@ public:
    Dynamic operator=(const Dynamic &inRHS)
    {
       Dynamic r = mObject->__SetItem(mIndex,inRHS);
-      HX_OBJ_WB_GET(mObject, hx::PointerOf((Dynamic)inRHS));
+      HX_OBJ_WB_GET(mObject, hx::PointerOf(inRHS));
       return r;
    }
    inline operator Dynamic() const { return mObject->__GetItem(mIndex); }
