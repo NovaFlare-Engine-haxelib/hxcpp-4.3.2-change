@@ -157,6 +157,17 @@ static inline void MaybeMinorCollect()
       sMinorCollectRequested = 1;
    }
 }
+
+int __hxcpp_get_minor_base_delta_bytes()
+{
+   return sMinorBaseDeltaBytes;
+}
+
+void __hxcpp_set_minor_base_delta_bytes(int inBytes)
+{
+   sMinorBaseDeltaBytes = inBytes>0 ? inBytes : 0;
+   sMinorBaselineInit = 0;
+}
 /* moved below MAX_GC_THREADS */
 
 static int gMaxPauseMillis = 3;

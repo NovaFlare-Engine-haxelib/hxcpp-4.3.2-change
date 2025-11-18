@@ -589,4 +589,6 @@ inline void MarkObjectAlloc(hx::Object *inPtr ,hx::MarkContext *__inCtx)
 
 
 #endif
+HXCPP_EXTERN_CLASS_ATTRIBUTES int   __hxcpp_get_minor_base_delta_bytes();
+HXCPP_EXTERN_CLASS_ATTRIBUTES void  __hxcpp_set_minor_base_delta_bytes(int inBytes);
 
