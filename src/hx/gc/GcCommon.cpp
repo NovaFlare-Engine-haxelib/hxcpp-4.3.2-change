@@ -159,15 +159,21 @@ static int sGcTickFrameCount = 0;
 
 void __hxcpp_gc_tick(double frameTimeLeftUs, int usedBytesThreshold, int minorEveryN)
 {
-   if (minorEveryN<=0) minorEveryN=1;
-   int used = __hxcpp_gc_used_bytes();
-   bool periodic = (sGcTickFrameCount % minorEveryN)==0;
-   bool memoryHigh = used > usedBytesThreshold;
-   if (frameTimeLeftUs > 200.0 && (memoryHigh || periodic))
+   extern volatile int sMinorCollectRequested;
+   extern int sStrictMinorRequested;
+   extern double sMinorLastCollect;
+   extern int sMinorMinIntervalMs;
+   if (sMinorCollectRequested)
    {
-      __hxcpp_collect(false);
+      sMinorCollectRequested = 0;
+      double now = __hxcpp_time_stamp();
+      if (now - sMinorLastCollect >= (double)sMinorMinIntervalMs/1000.0)
+      {
+         sStrictMinorRequested = 1;
+         __hxcpp_collect(false);
+         sMinorLastCollect = __hxcpp_time_stamp();
+      }
    }
-   sGcTickFrameCount++;
 }
 
 void  __hxcpp_set_minimum_working_memory(int inBytes)

@@ -123,6 +123,40 @@ static size_t sgMaximumFreeSpace  = 1024*1024*1024;
 #endif
 
 
+static volatile int sMinorBaseDeltaBytes = 512 * 1024;
+static size_t sMinorBaselineBytes = 0;
+static int    sMinorBaselineInit = 0;
+int    sStrictMinorRequested = 0;
+static double sMinorInitTime = 0.0;
+static int    sMinorGateMs = 50000;
+volatile int sMinorCollectRequested = 0;
+double sMinorLastCollect = 0.0;
+int    sMinorMinIntervalMs = 50;
+
+static inline void MaybeMinorCollect()
+{
+   if (!sgAllocInit)
+      return;
+   double now = __hxcpp_time_stamp();
+   if (now - sMinorInitTime < (double)sMinorGateMs/1000.0)
+      return;
+   if (sgIsCollecting)
+      return;
+   if (hx::gPauseForCollect)
+      return;
+   if (!hx::tlsStackContext)
+      return;
+   size_t used = (size_t)__hxcpp_gc_used_bytes();
+   if (!sMinorBaselineInit)
+   {
+      sMinorBaselineBytes = used;
+      sMinorBaselineInit = 1;
+   }
+   if (sMinorBaseDeltaBytes>0 && used > sMinorBaselineBytes + (size_t)sMinorBaseDeltaBytes)
+   {
+      sMinorCollectRequested = 1;
+   }
+}
 /* moved below MAX_GC_THREADS */
 
 static int gMaxPauseMillis = 3;
@@ -5093,7 +5127,8 @@ public:
       }
 
       hx::QuickVec<hx::Object *> rememberedSet;
-      generational = !inMajor && !inForceCompact && sGcMode == gcmGenerational;
+      int strict = sStrictMinorRequested; sStrictMinorRequested = 0;
+      generational = !inMajor && !inForceCompact && (sGcMode == gcmGenerational || strict);
       if (sGcMode==gcmGenerational)
       {
          hx::sGlobalChunks.copyPointers(rememberedSet,!generational);
@@ -5134,7 +5169,7 @@ public:
       if (!generational)
          sgTimeToNextTableUpdate--;
 
-      bool full = inMajor || (sgTimeToNextTableUpdate<=0) || inForceCompact;
+      bool full = inMajor || inForceCompact || (!strict && (sgTimeToNextTableUpdate<=0));
 
       // Setup memory target ...
       // Count free rows, and prep blocks for sorting
@@ -6781,6 +6816,8 @@ void InitAlloc()
       int mp = ReadEnvInt("HX_GC_MAX_PAUSE_MS", 3);
       int pr = ReadEnvBool("HX_GC_PARALLEL_REF_PROC", 1);
       int fs = ReadEnvBool("HX_GC_FORCE_SUSPEND", 0);
+      int bd = ReadEnvInt("HX_GC_MINOR_BASE_DELTA_BYTES", 524288);
+      int gm = ReadEnvInt("HX_GC_MINOR_GATE_MS", 1000);
       hx::GCConfig cfg = hx::GetGCConfig();
       cfg.parallelGcThreads = pg;
       cfg.concRefinementThreads = rt;
@@ -6788,7 +6825,11 @@ void InitAlloc()
       cfg.parallelRefProcEnabled = pr;
       hx::SetGCConfig(cfg);
       sForceSuspendSafepoint = fs;
-   }
+      sMinorBaseDeltaBytes = bd>0 ? bd : 0;
+      sMinorBaselineInit = 0;
+      sMinorGateMs = gm>0 ? gm : 0;
+      sMinorInitTime = __hxcpp_time_stamp();
+}
    sGlobalAlloc = new GlobalAllocator();
    sgFinalizers = new FinalizerList();
    sFinalizerLock = new HxMutex();
@@ -6866,6 +6907,7 @@ void *InternalNew(int inSize,bool inIsObject)
    if (inSize>=IMMIX_LARGE_OBJ_SIZE)
    {
       void *result = sGlobalAlloc->AllocLarge(inSize, true);
+      MaybeMinorCollect();
       return result;
    }
    else
@@ -6875,16 +6917,22 @@ void *InternalNew(int inSize,bool inIsObject)
       if (inIsObject)
       {
          void* result = tla->CallAlloc(inSize,IMMIX_ALLOC_IS_CONTAINER);
+         MaybeMinorCollect();
          return result;
       }
       else
       {
          #if defined(HXCPP_GC_MOVING) && defined(HXCPP_M64)
          if (inSize<8)
-            return tla->CallAlloc(8,0);
+         {
+            void *res = tla->CallAlloc(8,0);
+            MaybeMinorCollect();
+            return res;
+         }
          #endif
 
          void* result = tla->CallAlloc( (inSize+3)&~3,0);
+         MaybeMinorCollect();
          return result;
       }
    }
