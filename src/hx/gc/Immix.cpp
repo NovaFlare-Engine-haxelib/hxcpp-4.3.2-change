@@ -138,6 +138,8 @@ static inline void MaybeMinorCollect()
 {
    if (!sgAllocInit)
       return;
+   if (!sgInternalEnable)
+      return;
    double now = __hxcpp_time_stamp();
    if (now - sMinorInitTime < (double)sMinorAllowTime/1000.0)
       return;
@@ -6835,9 +6837,9 @@ void InitAlloc()
       int mp = ReadEnvInt("HX_GC_MAX_PAUSE_MS", 3);
       int pr = ReadEnvBool("HX_GC_PARALLEL_REF_PROC", 1);
       int fs = ReadEnvBool("HX_GC_FORCE_SUSPEND", 0);
-      int bd = ReadEnvInt("HX_GC_MINOR_BASE_DELTA_BYTES", 524288);
-      int gm = ReadEnvInt("HX_GC_MINOR_GATE_MS", 100);
-      int sb = ReadEnvInt("HX_GC_MINOR_START_BYTES", 8*1024*1024);
+      int bd = ReadEnvInt("HX_GC_MINOR_BASE_DELTA_BYTES", 1024 * 1024);
+      int gm = ReadEnvInt("HX_GC_MINOR_GATE_MS", 500);
+      int sb = ReadEnvInt("HX_GC_MINOR_START_BYTES", 1*1024*1024);
       hx::GCConfig cfg = hx::GetGCConfig();
       cfg.parallelGcThreads = pg;
       cfg.concRefinementThreads = rt;
