@@ -128,10 +128,10 @@ static size_t sMinorBaselineBytes = 0;
 static int    sMinorBaselineInit = 0;
 int    sStrictMinorRequested = 0;
 static double sMinorInitTime = 0.0;
-static int    sMinorGateMs = 50000;
+static int    sMinorAllowTime = 5000;
+static int    sMinorMinIntervalMs = 250;
 volatile int sMinorCollectRequested = 0;
 double sMinorLastCollect = 0.0;
-int    sMinorMinIntervalMs = 100;
 static size_t sMinorStartBytes = 8*1024*1024;
 
 static inline void MaybeMinorCollect()
@@ -139,7 +139,7 @@ static inline void MaybeMinorCollect()
    if (!sgAllocInit)
       return;
    double now = __hxcpp_time_stamp();
-   if (now - sMinorInitTime < (double)sMinorGateMs/1000.0)
+   if (now - sMinorInitTime < (double)sMinorAllowTime/1000.0)
       return;
    if (sgIsCollecting)
       return;
@@ -157,7 +157,7 @@ static inline void MaybeMinorCollect()
    }
    if (sMinorBaseDeltaBytes>0 && used > sMinorBaselineBytes + (size_t)sMinorBaseDeltaBytes)
    {
-      if (now - sMinorLastCollect >= 0.050)
+      if (now - sMinorLastCollect >= (double)sMinorMinIntervalMs/1000.0)
       {
          sStrictMinorRequested = 0;
          __hxcpp_collect(false);
@@ -6836,7 +6836,7 @@ void InitAlloc()
       int pr = ReadEnvBool("HX_GC_PARALLEL_REF_PROC", 1);
       int fs = ReadEnvBool("HX_GC_FORCE_SUSPEND", 0);
       int bd = ReadEnvInt("HX_GC_MINOR_BASE_DELTA_BYTES", 524288);
-      int gm = ReadEnvInt("HX_GC_MINOR_GATE_MS", 1000);
+      int gm = ReadEnvInt("HX_GC_MINOR_GATE_MS", 100);
       int sb = ReadEnvInt("HX_GC_MINOR_START_BYTES", 8*1024*1024);
       hx::GCConfig cfg = hx::GetGCConfig();
       cfg.parallelGcThreads = pg;
@@ -6847,7 +6847,7 @@ void InitAlloc()
       sForceSuspendSafepoint = fs;
       sMinorBaseDeltaBytes = bd>0 ? bd : 0;
       sMinorBaselineInit = 0;
-      sMinorGateMs = gm>0 ? gm : 0;
+      sMinorMinIntervalMs = gm>0 ? gm : 0;
       sMinorInitTime = __hxcpp_time_stamp();
       sMinorStartBytes = sb>0 ? (size_t)sb : 0;
 }
