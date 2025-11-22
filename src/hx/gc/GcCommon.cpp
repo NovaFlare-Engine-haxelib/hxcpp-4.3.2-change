@@ -155,25 +155,13 @@ void __hxcpp_enable(bool inEnable)
    hx::InternalEnableGC(inEnable);
 }
 
-static int sGcTickFrameCount = 0;
-
-void __hxcpp_gc_tick(double frameTimeLeftUs, int usedBytesThreshold, int minorEveryN)
+void __hxcpp_gc_tick()
 {
-   extern volatile int sMinorCollectRequested;
    extern int sStrictMinorRequested;
    extern double sMinorLastCollect;
-   extern int sMinorMinIntervalMs;
-   if (sMinorCollectRequested)
-   {
-      sMinorCollectRequested = 0;
-      double now = __hxcpp_time_stamp();
-      if (now - sMinorLastCollect >= (double)sMinorMinIntervalMs/1000.0)
-      {
-         sStrictMinorRequested = 1;
-         __hxcpp_collect(false);
-         sMinorLastCollect = __hxcpp_time_stamp();
-      }
-   }
+   sStrictMinorRequested = 0;
+   __hxcpp_collect(false);
+   sMinorLastCollect = __hxcpp_time_stamp();
 }
 
 void  __hxcpp_set_minimum_working_memory(int inBytes)
@@ -200,4 +188,3 @@ bool __hxcpp_is_const_string(const ::String &inString)
    #endif
    return ((unsigned int *)inString.raw_ptr())[-1] & HX_GC_CONST_ALLOC_BIT;
 }
-

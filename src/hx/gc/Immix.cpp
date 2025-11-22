@@ -131,7 +131,8 @@ static double sMinorInitTime = 0.0;
 static int    sMinorGateMs = 50000;
 volatile int sMinorCollectRequested = 0;
 double sMinorLastCollect = 0.0;
-int    sMinorMinIntervalMs = 50;
+int    sMinorMinIntervalMs = 100;
+static size_t sMinorStartBytes = 8*1024*1024;
 
 static inline void MaybeMinorCollect()
 {
@@ -147,6 +148,8 @@ static inline void MaybeMinorCollect()
    if (!hx::tlsStackContext)
       return;
    size_t used = (size_t)__hxcpp_gc_used_bytes();
+   if (sMinorStartBytes>0 && used < sMinorStartBytes)
+      return;
    if (!sMinorBaselineInit)
    {
       sMinorBaselineBytes = used;
@@ -154,7 +157,12 @@ static inline void MaybeMinorCollect()
    }
    if (sMinorBaseDeltaBytes>0 && used > sMinorBaselineBytes + (size_t)sMinorBaseDeltaBytes)
    {
-      sMinorCollectRequested = 1;
+      if (now - sMinorLastCollect >= 0.050)
+      {
+         sStrictMinorRequested = 0;
+         __hxcpp_collect(false);
+         sMinorLastCollect = now;
+      }
    }
 }
 
@@ -5120,6 +5128,7 @@ public:
 
       // Now all threads have mTopOfStack & mBottomOfStack set.
       bool generational = false; 
+      int strict = sStrictMinorRequested; sStrictMinorRequested = 0;
 
       #ifdef HXCPP_GC_GENERATIONAL
       bool compactSurviors = false;
@@ -5138,7 +5147,6 @@ public:
       }
 
       hx::QuickVec<hx::Object *> rememberedSet;
-      int strict = sStrictMinorRequested; sStrictMinorRequested = 0;
       generational = !inMajor && !inForceCompact && (sGcMode == gcmGenerational || strict);
       if (sGcMode==gcmGenerational)
       {
@@ -6829,6 +6837,7 @@ void InitAlloc()
       int fs = ReadEnvBool("HX_GC_FORCE_SUSPEND", 0);
       int bd = ReadEnvInt("HX_GC_MINOR_BASE_DELTA_BYTES", 524288);
       int gm = ReadEnvInt("HX_GC_MINOR_GATE_MS", 1000);
+      int sb = ReadEnvInt("HX_GC_MINOR_START_BYTES", 8*1024*1024);
       hx::GCConfig cfg = hx::GetGCConfig();
       cfg.parallelGcThreads = pg;
       cfg.concRefinementThreads = rt;
@@ -6840,6 +6849,7 @@ void InitAlloc()
       sMinorBaselineInit = 0;
       sMinorGateMs = gm>0 ? gm : 0;
       sMinorInitTime = __hxcpp_time_stamp();
+      sMinorStartBytes = sb>0 ? (size_t)sb : 0;
 }
    sGlobalAlloc = new GlobalAllocator();
    sgFinalizers = new FinalizerList();
@@ -7522,4 +7532,3 @@ unsigned int __hxcpp_obj_hash(Dynamic inObj)
 
 
 void DummyFunction(void *inPtr) { }
-
