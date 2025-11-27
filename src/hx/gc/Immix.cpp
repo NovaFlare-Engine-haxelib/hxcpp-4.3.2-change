@@ -123,8 +123,15 @@ static size_t sgMaximumFreeSpace  = 1024*1024*1024;
 #endif
 
 
+class GlobalAllocator;
+extern GlobalAllocator *sGlobalAlloc;
+int __hxcpp_gc_large_bytes();
+static int sForceSuspendSafepoint = 0;
+static size_t __hxcpp_process_used_bytes();
+
 static volatile int sMinorBaseDeltaBytes = 512 * 1024;
-static size_t sMinorBaselineBytes = 0;
+static size_t sGcMemLineBytes = 0;
+static size_t sProcessMemLineBytes = 0;
 static int    sMinorBaselineInit = 0;
 int    sStrictMinorRequested = 0;
 static double sMinorInitTime = 0.0;
@@ -133,6 +140,8 @@ static int    sMinorMinIntervalMs = 250;
 volatile int sMinorCollectRequested = 0;
 double sMinorLastCollect = 0.0;
 static size_t sMinorStartBytes = 8*1024*1024;
+
+static int sLargeAllocRefreshEnabled = 1;
 
 static inline void MaybeMinorCollect()
 {
@@ -150,19 +159,29 @@ static inline void MaybeMinorCollect()
    if (!hx::tlsStackContext)
       return;
    size_t used = (size_t)__hxcpp_gc_used_bytes();
+   size_t processUsed = (size_t)__hxcpp_process_used_bytes();
    if (sMinorStartBytes>0 && used < sMinorStartBytes)
       return;
    if (!sMinorBaselineInit)
    {
-      sMinorBaselineBytes = used;
+      sGcMemLineBytes = used;
+      sProcessMemLineBytes = processUsed;
       sMinorBaselineInit = 1;
    }
-   if (sMinorBaseDeltaBytes>0 && used > sMinorBaselineBytes + (size_t)sMinorBaseDeltaBytes)
+   if (sGcMemLineBytes > used)
+      sGcMemLineBytes = used;
+   if (sProcessMemLineBytes > processUsed)
+      sProcessMemLineBytes = processUsed;
+   
+   if (sMinorBaseDeltaBytes>0 && ((used > sGcMemLineBytes + (size_t)sMinorBaseDeltaBytes) || (processUsed > sProcessMemLineBytes + (size_t)sMinorBaseDeltaBytes)))
    {
       if (now - sMinorLastCollect >= (double)sMinorMinIntervalMs/1000.0)
       {
          sStrictMinorRequested = 0;
+         int oldAgg = sForceSuspendSafepoint;
+         sForceSuspendSafepoint = 1;
          __hxcpp_collect(false);
+         sForceSuspendSafepoint = oldAgg;
          sMinorLastCollect = now;
       }
    }
@@ -394,7 +413,6 @@ void __hxcpp_gc_set_max_pause_ms(int ms)
    }
 }
 
-static int sForceSuspendSafepoint = 0;
 void __hxcpp_gc_aggressive_safepoint(int enable)
 {
    sForceSuspendSafepoint = enable ? 1 : 0;
@@ -3441,7 +3459,7 @@ public:
 
       //Should we force a collect ? - the 'large' data are not considered when allocating objects
       // from the blocks, and can 'pile up' between smalll object allocations
-      if ((inSize+mLargeAllocated > mLargeAllocForceRefresh) && sgInternalEnable)
+      if (sLargeAllocRefreshEnabled && (inSize+mLargeAllocated > mLargeAllocForceRefresh) && sgInternalEnable)
       {
          #ifdef SHOW_MEM_EVENTS
          //GCLOG("Large alloc causing collection");
@@ -3542,7 +3560,7 @@ public:
       {
          //Should we force a collect ? - the 'large' data are not considered when allocating objects
          // from the blocks, and can 'pile up' between smalll object allocations
-         if (inDelta>0 && (inDelta+mLargeAllocated > mLargeAllocForceRefresh) && sgInternalEnable)
+         if (sLargeAllocRefreshEnabled && inDelta>0 && (inDelta+mLargeAllocated > mLargeAllocForceRefresh) && sgInternalEnable)
          {
             //GCLOG("onMemoryChange alloc causing collection");
             CollectFromThisThread(false,false);
@@ -5530,6 +5548,11 @@ public:
       mAllBlocksCount   = mAllBlocks.size();
       mCurrentRowsInUse = mRowsInUse;
 
+      sGcMemLineBytes = (size_t)__hxcpp_gc_used_bytes();
+      sProcessMemLineBytes = (size_t)__hxcpp_process_used_bytes();
+
+
+
       #ifdef SHOW_MEM_EVENTS
       GCLOG("Collect Done\n");
       #endif
@@ -6822,7 +6845,7 @@ void ExitGCFreeZoneLocked()
    #endif
 }
 
-void InitAlloc()
+void InitAlloc() //inits
 {
    for(int i=0;i<IMMIX_LINE_LEN;i++)
       gImmixStartFlag[i] = 1<<( i>>2 ) ;
@@ -6833,13 +6856,14 @@ void InitAlloc()
    {
       int cores = hxGetCpuCores();
       int pg = ReadEnvInt("HX_GC_PARALLEL_THREADS", cores);
-      int rt = ReadEnvInt("HX_GC_REFINE_THREADS", cores/2);
+      int rt = ReadEnvInt("HX_GC_REFINE_THREADS", cores / 2);
       int mp = ReadEnvInt("HX_GC_MAX_PAUSE_MS", 3);
       int pr = ReadEnvBool("HX_GC_PARALLEL_REF_PROC", 1);
       int fs = ReadEnvBool("HX_GC_FORCE_SUSPEND", 0);
-      int bd = ReadEnvInt("HX_GC_MINOR_BASE_DELTA_BYTES", 1024 * 1024);
-      int gm = ReadEnvInt("HX_GC_MINOR_GATE_MS", 500);
-      int sb = ReadEnvInt("HX_GC_MINOR_START_BYTES", 1*1024*1024);
+      int bd = ReadEnvInt("HX_GC_MINOR_BASE_DELTA_BYTES", 512 * 1024);
+      int gm = ReadEnvInt("HX_GC_MINOR_GATE_MS", 250);
+      int sb = ReadEnvInt("HX_GC_MINOR_START_BYTES", 8*1024*1024);
+      int lr = ReadEnvBool("HX_GC_LARGE_REFRESH", 0);
       hx::GCConfig cfg = hx::GetGCConfig();
       cfg.parallelGcThreads = pg;
       cfg.concRefinementThreads = rt;
@@ -6847,6 +6871,7 @@ void InitAlloc()
       cfg.parallelRefProcEnabled = pr;
       hx::SetGCConfig(cfg);
       sForceSuspendSafepoint = fs;
+      sLargeAllocRefreshEnabled = lr ? 1 : 0;
       sMinorBaseDeltaBytes = bd>0 ? bd : 0;
       sMinorBaselineInit = 0;
       sMinorMinIntervalMs = gm>0 ? gm : 0;
@@ -6930,7 +6955,6 @@ void *InternalNew(int inSize,bool inIsObject)
    if (inSize>=IMMIX_LARGE_OBJ_SIZE)
    {
       void *result = sGlobalAlloc->AllocLarge(inSize, true);
-      MaybeMinorCollect();
       return result;
    }
    else
@@ -6940,7 +6964,6 @@ void *InternalNew(int inSize,bool inIsObject)
       if (inIsObject)
       {
          void* result = tla->CallAlloc(inSize,IMMIX_ALLOC_IS_CONTAINER);
-         MaybeMinorCollect();
          return result;
       }
       else
@@ -6949,13 +6972,11 @@ void *InternalNew(int inSize,bool inIsObject)
          if (inSize<8)
          {
             void *res = tla->CallAlloc(8,0);
-            MaybeMinorCollect();
             return res;
          }
          #endif
 
          void* result = tla->CallAlloc( (inSize+3)&~3,0);
-         MaybeMinorCollect();
          return result;
       }
    }
@@ -7458,6 +7479,11 @@ void hxcpp_set_top_of_stack()
    int i = 0;
    hx::SetTopOfStack(&i,false);
 }
+}
+
+void __hxcpp_gc_update()
+{
+   MaybeMinorCollect();
 }
 
 void __hxcpp_enter_gc_free_zone()
