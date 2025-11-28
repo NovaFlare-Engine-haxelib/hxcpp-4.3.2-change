@@ -6856,8 +6856,8 @@ void InitAlloc() //inits
    InitGcThreadConfig();
    {
       int cores = hxGetCpuCores();
-      int pg = ReadEnvInt("HX_GC_PARALLEL_THREADS", cores);
-      int rt = ReadEnvInt("HX_GC_REFINE_THREADS", cores / 2);
+      int pg = ReadEnvInt("HX_GC_PARALLEL_THREADS", 2);
+      int rt = ReadEnvInt("HX_GC_REFINE_THREADS", 1);
       int mp = ReadEnvInt("HX_GC_MAX_PAUSE_MS", 3);
       int pr = ReadEnvBool("HX_GC_PARALLEL_REF_PROC", 1);
       int fs = ReadEnvBool("HX_GC_FORCE_SUSPEND", 0);
