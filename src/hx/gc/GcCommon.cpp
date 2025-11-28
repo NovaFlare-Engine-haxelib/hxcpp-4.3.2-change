@@ -26,8 +26,8 @@ extern void __hxt_new_string(void* result, int size);
 
 namespace hx
 {
-int sgMinimumWorkingMemory       = 64*1024*1024;
-int sgMinimumFreeSpace           = 64*1024*1024;
+int sgMinimumWorkingMemory       = 20*1024*1024;
+int sgMinimumFreeSpace           = 10*1024*1024;
 
 // Once you use more than the minimum, this kicks in...
 int sgTargetFreeSpacePercentage  = 80;

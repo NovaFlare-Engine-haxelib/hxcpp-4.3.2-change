@@ -128,6 +128,7 @@ extern GlobalAllocator *sGlobalAlloc;
 int __hxcpp_gc_large_bytes();
 static int sForceSuspendSafepoint = 0;
 static size_t __hxcpp_process_used_bytes();
+size_t __hxcpp_gc_working_memory();
 
 static volatile int sMinorBaseDeltaBytes = 512 * 1024;
 static size_t sGcMemLineBytes = 0;
@@ -173,7 +174,7 @@ static inline void MaybeMinorCollect()
    if (sProcessMemLineBytes > processUsed)
       sProcessMemLineBytes = processUsed;
    
-   if (sMinorBaseDeltaBytes>0 && ((used > sGcMemLineBytes + (size_t)sMinorBaseDeltaBytes) || (processUsed > sProcessMemLineBytes + (size_t)sMinorBaseDeltaBytes)))
+   if (sMinorBaseDeltaBytes>0 && ((used > sGcMemLineBytes + (size_t)sMinorBaseDeltaBytes) || (processUsed > sProcessMemLineBytes + (size_t)sMinorBaseDeltaBytes && __hxcpp_gc_working_memory() >= sWorkingMemorySize)))
    {
       if (now - sMinorLastCollect >= (double)sMinorMinIntervalMs/1000.0)
       {
@@ -7432,6 +7433,11 @@ double __hxcpp_gc_mem_info(int inWhich)
    return 0;
 }
 
+size_t __hxcpp_gc_working_memory()
+{
+   return sGlobalAlloc ? sGlobalAlloc->GetWorkingMemory() : 0;
+}
+
 int   __hxcpp_gc_used_bytes()
 {
    return sGlobalAlloc->MemUsage();
@@ -7483,7 +7489,6 @@ void hxcpp_set_top_of_stack()
 
 void __hxcpp_gc_update()
 {
-   if (sGlobalAlloc && sGlobalAlloc->GetWorkingMemory() < sWorkingMemorySize) return;
    MaybeMinorCollect();
 }
 
