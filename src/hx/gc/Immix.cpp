@@ -7483,6 +7483,7 @@ void hxcpp_set_top_of_stack()
 
 void __hxcpp_gc_update()
 {
+   if (sGlobalAlloc && sGlobalAlloc->GetWorkingMemory() < sWorkingMemorySize) return;
    MaybeMinorCollect();
 }
 
@@ -7497,13 +7498,10 @@ bool __hxcpp_try_gc_free_zone()
    return hx::TryGCFreeZone();
 }
 
-
-
 void __hxcpp_exit_gc_free_zone()
 {
    hx::ExitGCFreeZone();
 }
-
 
 void __hxcpp_gc_safe_point()
 {
