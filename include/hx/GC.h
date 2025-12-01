@@ -38,11 +38,34 @@ HXCPP_EXTERN_CLASS_ATTRIBUTES void  __hxcpp_enter_gc_free_zone();
 HXCPP_EXTERN_CLASS_ATTRIBUTES void  __hxcpp_exit_gc_free_zone();
 HXCPP_EXTERN_CLASS_ATTRIBUTES void  __hxcpp_gc_safe_point();
 HXCPP_EXTERN_CLASS_ATTRIBUTES void  __hxcpp_spam_collects(int inEveryNCalls);
-HXCPP_EXTERN_CLASS_ATTRIBUTES void  __hxcpp_gc_tick();
+
+HXCPP_EXTERN_CLASS_ATTRIBUTES void  __hxcpp_gc_minor();
 HXCPP_EXTERN_CLASS_ATTRIBUTES void  __hxcpp_gc_update();
+
+HXCPP_EXTERN_CLASS_ATTRIBUTES int   __hxcpp_get_minor_base_delta_bytes();
+HXCPP_EXTERN_CLASS_ATTRIBUTES void  __hxcpp_set_minor_base_delta_bytes(int inBytes);
+HXCPP_EXTERN_CLASS_ATTRIBUTES void  __hxcpp_set_minor_gate_ms(int inMs);
+HXCPP_EXTERN_CLASS_ATTRIBUTES void  __hxcpp_set_minor_start_bytes(int inBytes);
+HXCPP_EXTERN_CLASS_ATTRIBUTES void  __hxcpp_gc_large_refresh_enable(int inEnable);
+HXCPP_EXTERN_CLASS_ATTRIBUTES int   __hxcpp_get_minor_gate_ms();
+HXCPP_EXTERN_CLASS_ATTRIBUTES int   __hxcpp_get_minor_start_bytes();
+HXCPP_EXTERN_CLASS_ATTRIBUTES int   __hxcpp_gc_get_large_refresh_enabled();
+
+HXCPP_EXTERN_CLASS_ATTRIBUTES void  __hxcpp_gc_set_threads(int parallelThreads, int refineThreads);
+HXCPP_EXTERN_CLASS_ATTRIBUTES void  __hxcpp_gc_set_max_pause_ms(int inMs);
+HXCPP_EXTERN_CLASS_ATTRIBUTES void  __hxcpp_gc_aggressive_safepoint(int inEnable);
+HXCPP_EXTERN_CLASS_ATTRIBUTES void  __hxcpp_gc_enable_parallel_ref_proc(int inEnable);
+HXCPP_EXTERN_CLASS_ATTRIBUTES int   __hxcpp_gc_get_parallel_threads();
+HXCPP_EXTERN_CLASS_ATTRIBUTES int   __hxcpp_gc_get_refine_threads();
+HXCPP_EXTERN_CLASS_ATTRIBUTES int   __hxcpp_gc_get_max_pause_ms();
+HXCPP_EXTERN_CLASS_ATTRIBUTES int   __hxcpp_gc_get_aggressive_safepoint();
+HXCPP_EXTERN_CLASS_ATTRIBUTES int   __hxcpp_gc_get_parallel_ref_proc_enabled();
+
 HXCPP_EXTERN_CLASS_ATTRIBUTES void  __hxcpp_set_minimum_working_memory(int inBytes);
 HXCPP_EXTERN_CLASS_ATTRIBUTES void  __hxcpp_set_minimum_free_space(int inBytes);
+
 HXCPP_EXTERN_CLASS_ATTRIBUTES void  __hxcpp_set_target_free_space_percentage(int inPercentage);
+
 HXCPP_EXTERN_CLASS_ATTRIBUTES bool __hxcpp_is_const_string(const ::String &inString);
 HXCPP_EXTERN_CLASS_ATTRIBUTES Dynamic _hx_gc_freeze(Dynamic inObject);
 
@@ -590,5 +613,3 @@ inline void MarkObjectAlloc(hx::Object *inPtr ,hx::MarkContext *__inCtx)
 
 
 #endif
-HXCPP_EXTERN_CLASS_ATTRIBUTES int   __hxcpp_get_minor_base_delta_bytes();
-HXCPP_EXTERN_CLASS_ATTRIBUTES void  __hxcpp_set_minor_base_delta_bytes(int inBytes);

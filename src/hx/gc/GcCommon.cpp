@@ -151,7 +151,7 @@ void __hxcpp_enable(bool inEnable)
    hx::InternalEnableGC(inEnable);
 }
 
-void __hxcpp_gc_tick()
+void __hxcpp_gc_minor()
 {
    extern int sStrictMinorRequested;
    extern double sMinorLastCollect;

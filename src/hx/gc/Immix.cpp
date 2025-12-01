@@ -129,6 +129,7 @@ int __hxcpp_gc_large_bytes();
 static int sForceSuspendSafepoint = 0;
 static size_t __hxcpp_process_used_bytes();
 size_t __hxcpp_gc_working_memory();
+int __hxcpp_gc_reserved_bytes();
 
 static volatile int sMinorBaseDeltaBytes = 512 * 1024;
 static size_t sGcMemLineBytes = 0;
@@ -173,18 +174,19 @@ static inline void MaybeMinorCollect()
       sGcMemLineBytes = used;
    if (sProcessMemLineBytes > processUsed)
       sProcessMemLineBytes = processUsed;
-   
-   if (sMinorBaseDeltaBytes>0 && ((used > sGcMemLineBytes + (size_t)sMinorBaseDeltaBytes) || (processUsed > sProcessMemLineBytes + (size_t)sMinorBaseDeltaBytes && __hxcpp_gc_working_memory() >= sWorkingMemorySize)))
+
+   if (now - sMinorLastCollect >= (double)sMinorMinIntervalMs/1000.0)
    {
-      if (now - sMinorLastCollect >= (double)sMinorMinIntervalMs/1000.0)
+      if (sMinorBaseDeltaBytes>0 && ((used > sGcMemLineBytes + (size_t)sMinorBaseDeltaBytes) || (processUsed > sProcessMemLineBytes + (size_t)sMinorBaseDeltaBytes && ((size_t)__hxcpp_gc_reserved_bytes() > (sWorkingMemorySize + std::max((size_t)8*1024*1024, sWorkingMemorySize*5/4))))))
       {
          sStrictMinorRequested = 0;
          int oldAgg = sForceSuspendSafepoint;
          sForceSuspendSafepoint = 1;
          __hxcpp_collect(false);
          sForceSuspendSafepoint = oldAgg;
-         sMinorLastCollect = now;
       }
+
+      sMinorLastCollect = now;
    }
 }
 
@@ -393,37 +395,81 @@ void SetGCConfig(const GCConfig &c)
    if (c.maxPauseMillis>0)
       gMaxPauseMillis = c.maxPauseMillis;
 }
-GCConfig GetGCConfig() { return gGcConfig; }
+   GCConfig GetGCConfig() { return gGcConfig; }
 }
 
-extern "C" {
-void __hxcpp_gc_set_threads(int parallelThreads, int refineThreads)
-{
-   hx::GCConfig cfg = hx::GetGCConfig();
-   if (parallelThreads>0) cfg.parallelGcThreads = parallelThreads;
-   if (refineThreads>0) cfg.concRefinementThreads = refineThreads;
-   hx::SetGCConfig(cfg);
-}
-void __hxcpp_gc_set_max_pause_ms(int ms)
-{
-   if (ms>0)
+// linkage: use C++ to match header prototypes
+   void __hxcpp_gc_set_threads(int parallelThreads, int refineThreads)
    {
       hx::GCConfig cfg = hx::GetGCConfig();
-      cfg.maxPauseMillis = ms;
+      if (parallelThreads>0) cfg.parallelGcThreads = parallelThreads;
+      if (refineThreads>0) cfg.concRefinementThreads = refineThreads;
       hx::SetGCConfig(cfg);
    }
-}
+   void __hxcpp_gc_set_max_pause_ms(int ms)
+   {
+      if (ms>0)
+      {
+         hx::GCConfig cfg = hx::GetGCConfig();
+         cfg.maxPauseMillis = ms;
+         hx::SetGCConfig(cfg);
+      }
+   }
 
-void __hxcpp_gc_aggressive_safepoint(int enable)
-{
-   sForceSuspendSafepoint = enable ? 1 : 0;
-}
+   void __hxcpp_gc_aggressive_safepoint(int enable)
+   {
+      sForceSuspendSafepoint = enable ? 1 : 0;
+   }
 void __hxcpp_gc_enable_parallel_ref_proc(int enable)
 {
    hx::GCConfig cfg = hx::GetGCConfig();
    cfg.parallelRefProcEnabled = enable?1:0;
    hx::SetGCConfig(cfg);
 }
+// end settings API block
+void __hxcpp_set_minor_gate_ms(int ms)
+{
+   sMinorMinIntervalMs = ms>0 ? ms : 0;
+}
+void __hxcpp_set_minor_start_bytes(int bytes)
+{
+   sMinorStartBytes = bytes>0 ? (size_t)bytes : 0;
+}
+void __hxcpp_gc_large_refresh_enable(int enable)
+{
+   sLargeAllocRefreshEnabled = enable ? 1 : 0;
+}
+int __hxcpp_get_minor_gate_ms()
+{
+   return sMinorMinIntervalMs;
+}
+int __hxcpp_get_minor_start_bytes()
+{
+   return (int)sMinorStartBytes;
+}
+int __hxcpp_gc_get_large_refresh_enabled()
+{
+   return sLargeAllocRefreshEnabled;
+}
+int __hxcpp_gc_get_parallel_threads()
+{
+   return hx::GetGCConfig().parallelGcThreads;
+}
+int __hxcpp_gc_get_refine_threads()
+{
+   return hx::GetGCConfig().concRefinementThreads;
+}
+int __hxcpp_gc_get_max_pause_ms()
+{
+   return hx::GetGCConfig().maxPauseMillis;
+}
+int __hxcpp_gc_get_aggressive_safepoint()
+{
+   return sForceSuspendSafepoint;
+}
+int __hxcpp_gc_get_parallel_ref_proc_enabled()
+{
+   return hx::GetGCConfig().parallelRefProcEnabled;
 }
 
 enum { MARK_BYTE_MASK = 0x0f };
@@ -6855,7 +6901,6 @@ void InitAlloc() //inits
    sgAllocInit = true;
    InitGcThreadConfig();
    {
-      int cores = hxGetCpuCores();
       int pg = ReadEnvInt("HX_GC_PARALLEL_THREADS", 2);
       int rt = ReadEnvInt("HX_GC_REFINE_THREADS", 1);
       int mp = ReadEnvInt("HX_GC_MAX_PAUSE_MS", 3);
@@ -6878,7 +6923,8 @@ void InitAlloc() //inits
       sMinorMinIntervalMs = gm>0 ? gm : 0;
       sMinorInitTime = __hxcpp_time_stamp();
       sMinorStartBytes = sb>0 ? (size_t)sb : 0;
-}
+   }
+   
    sGlobalAlloc = new GlobalAllocator();
    sgFinalizers = new FinalizerList();
    sFinalizerLock = new HxMutex();
@@ -7284,72 +7330,20 @@ int   __hxcpp_gc_reserved_bytes()
 static size_t __hxcpp_process_used_bytes()
 {
    #ifdef HX_WINDOWS
-   // Private Working Set with robust sizing and cached fallback to avoid zero spikes.
-   static SIZE_T s_lastPrivateWS = 0;
-
-   SIZE_T pageSize = 4096;
+   static int s_winMemMode = -1; // -1=init, 0=WorkingSetSize, 1=PrivateUsage
+   if (s_winMemMode<0)
    {
-      SYSTEM_INFO si;
-      GetSystemInfo(&si);
-      if (si.dwPageSize) pageSize = si.dwPageSize;
+      // 0 -> WorkingSet (Task Manager "Working Set"), 1 -> PrivateUsage (closer to TM "Memory" on newer Windows)
+      s_winMemMode = ReadEnvInt("HX_GC_WIN_PROCESS_MEM_MODE", 0);
    }
 
-   // Estimate entries from current WorkingSetSize to reduce QueryWorkingSet failures
-   SIZE_T estimatedEntries = (SIZE_T)(1<<12); // default
+   PROCESS_MEMORY_COUNTERS pmc;
+   SIZE_T sz = sizeof(pmc);
+   if (GetProcessMemoryInfo(GetCurrentProcess(), &pmc, (DWORD)sz))
    {
-      PROCESS_MEMORY_COUNTERS_EX pmc;
-      SIZE_T sz = sizeof(pmc);
-      if (GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS*)&pmc, (DWORD)sz) && pageSize>0)
-      {
-         SIZE_T wsPages = (SIZE_T)(pmc.WorkingSetSize / pageSize);
-         if (wsPages>0) estimatedEntries = wsPages + (wsPages>>3); // +12.5% margin
-      }
+      if (s_winMemMode==1) return (size_t)pmc.PagefileUsage;
+      return (size_t)pmc.WorkingSetSize;
    }
-
-   SIZE_T privateWs = 0;
-   SIZE_T bufEntries = estimatedEntries;
-   for (int tries=0; tries<6; ++tries)
-   {
-      SIZE_T header = sizeof(PSAPI_WORKING_SET_INFORMATION);
-      SIZE_T entry  = sizeof(PSAPI_WORKING_SET_BLOCK);
-      SIZE_T bufSize = header + entry * bufEntries;
-      PSAPI_WORKING_SET_INFORMATION *info = (PSAPI_WORKING_SET_INFORMATION *)malloc(bufSize);
-      if (!info)
-         break;
-
-      BOOL ok = QueryWorkingSet(GetCurrentProcess(), info, (DWORD)bufSize);
-      if (!ok)
-      {
-         free(info);
-         bufEntries = bufEntries << 1; // grow and retry
-         continue;
-      }
-
-      privateWs = 0;
-      for (SIZE_T i=0; i<info->NumberOfEntries; ++i)
-      {
-         PSAPI_WORKING_SET_BLOCK block = info->WorkingSetInfo[i];
-         if (!block.Shared)
-            privateWs += pageSize;
-      }
-      free(info);
-      break;
-   }
-
-   if (privateWs>0)
-   {
-      s_lastPrivateWS = privateWs;
-      return (size_t)privateWs;
-   }
-
-   // If failed, return last non-zero value; if none yet, fall back once to total WorkingSetSize
-   if (s_lastPrivateWS>0)
-      return (size_t)s_lastPrivateWS;
-
-   PROCESS_MEMORY_COUNTERS_EX pmc2;
-   SIZE_T sz2 = sizeof(pmc2);
-   if (GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS*)&pmc2, (DWORD)sz2))
-      return (size_t)pmc2.WorkingSetSize;
 
    return 0;
    #elif defined(HX_MACOS) || defined(HX_IOS)
