@@ -160,23 +160,24 @@ static inline void MaybeMinorCollect()
       return;
    if (!hx::tlsStackContext)
       return;
-   size_t used = (size_t)__hxcpp_gc_used_bytes();
-   size_t processUsed = (size_t)__hxcpp_process_used_bytes();
-   if (sMinorStartBytes>0 && used < sMinorStartBytes)
-      return;
-   if (!sMinorBaselineInit)
-   {
-      sGcMemLineBytes = used;
-      sProcessMemLineBytes = processUsed;
-      sMinorBaselineInit = 1;
-   }
-   if (sGcMemLineBytes > used)
-      sGcMemLineBytes = used;
-   if (sProcessMemLineBytes > processUsed)
-      sProcessMemLineBytes = processUsed;
 
    if (now - sMinorLastCollect >= (double)sMinorMinIntervalMs/1000.0)
    {
+      size_t used = (size_t)__hxcpp_gc_used_bytes();
+      size_t processUsed = (size_t)__hxcpp_process_used_bytes();
+      if (sMinorStartBytes>0 && used < sMinorStartBytes)
+         return;
+      if (!sMinorBaselineInit)
+      {
+         sGcMemLineBytes = used;
+         sProcessMemLineBytes = processUsed;
+         sMinorBaselineInit = 1;
+      }
+      if (sGcMemLineBytes > used)
+         sGcMemLineBytes = used;
+      if (sProcessMemLineBytes > processUsed)
+      sProcessMemLineBytes = processUsed;
+
       if (sMinorBaseDeltaBytes>0 && ((used > sGcMemLineBytes + (size_t)sMinorBaseDeltaBytes) || (processUsed > sProcessMemLineBytes + (size_t)sMinorBaseDeltaBytes && ((size_t)__hxcpp_gc_reserved_bytes() > (sWorkingMemorySize + std::max((size_t)8*1024*1024, sWorkingMemorySize*5/4))))))
       {
          sStrictMinorRequested = 0;
@@ -186,7 +187,7 @@ static inline void MaybeMinorCollect()
          sForceSuspendSafepoint = oldAgg;
       }
 
-      sMinorLastCollect = now;
+      sMinorLastCollect += (double)sMinorMinIntervalMs / 2;
    }
 }
 
