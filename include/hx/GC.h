@@ -50,10 +50,6 @@ HXCPP_EXTERN_CLASS_ATTRIBUTES void  __hxcpp_gc_large_refresh_enable(int inEnable
 HXCPP_EXTERN_CLASS_ATTRIBUTES int   __hxcpp_get_minor_gate_ms();
 HXCPP_EXTERN_CLASS_ATTRIBUTES int   __hxcpp_get_minor_start_bytes();
 HXCPP_EXTERN_CLASS_ATTRIBUTES int   __hxcpp_gc_get_large_refresh_enabled();
-HXCPP_EXTERN_CLASS_ATTRIBUTES void  __hxcpp_gc_enable_parallel_large_sweep(int inEnable);
-HXCPP_EXTERN_CLASS_ATTRIBUTES void  __hxcpp_gc_set_large_sweep_threads(int inThreads);
-HXCPP_EXTERN_CLASS_ATTRIBUTES int   __hxcpp_gc_get_parallel_large_sweep_enabled();
-HXCPP_EXTERN_CLASS_ATTRIBUTES int   __hxcpp_gc_get_large_sweep_threads();
 
 HXCPP_EXTERN_CLASS_ATTRIBUTES void  __hxcpp_gc_set_threads(int parallelThreads, int refineThreads);
 HXCPP_EXTERN_CLASS_ATTRIBUTES void  __hxcpp_gc_set_max_pause_ms(int inMs);
