@@ -6910,7 +6910,7 @@ void InitAlloc() //inits
       int bd = ReadEnvInt("HX_GC_MINOR_BASE_DELTA_BYTES", 512 * 1024);
       int gm = ReadEnvInt("HX_GC_MINOR_GATE_MS", 250);
       int sb = ReadEnvInt("HX_GC_MINOR_START_BYTES", 8*1024*1024);
-      int lr = ReadEnvBool("HX_GC_LARGE_REFRESH", 0);
+      int lr = ReadEnvBool("HX_GC_LARGE_REFRESH", 1);
       hx::GCConfig cfg = hx::GetGCConfig();
       cfg.parallelGcThreads = pg;
       cfg.concRefinementThreads = rt;
