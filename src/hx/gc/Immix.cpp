@@ -144,6 +144,8 @@ double sMinorLastCollect = 0.0;
 static size_t sMinorStartBytes = 8*1024*1024;
 
 static int sLargeAllocRefreshEnabled = 1;
+static int sParallelLargeSweepEnabled = 0;
+static int gGcLargeSweepThreads = 0;
 
 static inline void MaybeMinorCollect()
 {
@@ -428,6 +430,27 @@ void __hxcpp_gc_enable_parallel_ref_proc(int enable)
    hx::SetGCConfig(cfg);
 }
 // end settings API block
+void __hxcpp_gc_enable_parallel_large_sweep(int enable)
+{
+   sParallelLargeSweepEnabled = enable ? 1 : 0;
+}
+void __hxcpp_gc_set_large_sweep_threads(int threads)
+{
+   if (threads>0)
+   {
+      int t = threads;
+      if (t>(int)MAX_GC_THREADS) t = (int)MAX_GC_THREADS;
+      gGcLargeSweepThreads = t;
+   }
+}
+int __hxcpp_gc_get_parallel_large_sweep_enabled()
+{
+   return sParallelLargeSweepEnabled;
+}
+int __hxcpp_gc_get_large_sweep_threads()
+{
+   return gGcLargeSweepThreads;
+}
 void __hxcpp_set_minor_gate_ms(int ms)
 {
    sMinorMinIntervalMs = ms>0 ? ms : 0;
@@ -876,6 +899,7 @@ enum ThreadPoolJob
    tpjCountRows,
    tpjAsyncZero,
    tpjAsyncZeroJit,
+   tpjSweepLarge,
    tpjGetStats,
    tpjVisitBlocks,
 };
@@ -946,6 +970,7 @@ static BlockDataStats sThreadBlockDataStats[MAX_GC_THREADS];
 #ifdef HXCPP_VISIT_ALLOCS
 static hx::VisitContext *sThreadVisitContext = 0;
 #endif
+static hx::QuickVec<unsigned int *> sThreadLargeUnmarked[MAX_GC_THREADS];
    
 
 
@@ -4603,33 +4628,43 @@ public:
       }
    }
 
-   void CountAsync(BlockDataStats &outStats)
-   {
-      while(!sgThreadPoolAbort)
-      {
-         int blockId = _hx_atomic_add(&mThreadJobId, 1);
-         if (blockId>=mAllBlocks.size())
-            break;
+  void CountAsync(BlockDataStats &outStats)
+  {
+     while(!sgThreadPoolAbort)
+     {
+        int blockId = _hx_atomic_add(&mThreadJobId, 1);
+        if (blockId>=mAllBlocks.size())
+           break;
 
-         mAllBlocks[blockId]->countRows(outStats);
-      }
-   }
+        mAllBlocks[blockId]->countRows(outStats);
+     }
+  }
+
+  void LargeSweepAsync(int inId)
+  {
+     while(!sgThreadPoolAbort)
+     {
+        int blockId = _hx_atomic_add(&mThreadJobId, 1);
+        if (blockId>=mLargeList.size())
+           break;
+        unsigned int *blob = mLargeList[blockId];
+        if ( (blob[1] & IMMIX_ALLOC_MARK_ID) != hx::gMarkID )
+           sThreadLargeUnmarked[inId].push(blob);
+     }
+  }
 
 
-   void GetStatsAsync(BlockDataStats &outStats)
-   {
-      while(!sgThreadPoolAbort)
-      {
-         int blockId = _hx_atomic_add(&mThreadJobId, 1);
-         if (blockId>=mAllBlocks.size())
-            break;
+  void GetStatsAsync(BlockDataStats &outStats)
+  {
+     while(!sgThreadPoolAbort)
+     {
+        int blockId = _hx_atomic_add(&mThreadJobId, 1);
+        if (blockId>=mAllBlocks.size())
+           break;
 
-         mAllBlocks[blockId]->getStats( outStats );
-      }
-   }
-
-  
-
+        mAllBlocks[blockId]->getStats( outStats );
+     }
+  }
    #ifdef HXCPP_VISIT_ALLOCS
    void VisitBlockAsync(hx::VisitContext *inCtx)
    {
@@ -4643,7 +4678,6 @@ public:
       }
    }
    #endif
-
 
    void ZeroAsync()
    {
@@ -4782,29 +4816,32 @@ public:
             if (ZeroAsyncJit())
                finishThreadJob(inId);
          }
-         else
-         {
-            if (sgThreadPoolJob==tpjReclaimFull || sgThreadPoolJob==tpjReclaim)
+        else
+        {
+           if (sgThreadPoolJob==tpjReclaimFull || sgThreadPoolJob==tpjReclaim)
                ReclaimAsync(sThreadBlockDataStats[inId]);
 
-            else if (sgThreadPoolJob==tpjCountRows)
+           else if (sgThreadPoolJob==tpjCountRows)
                CountAsync(sThreadBlockDataStats[inId]);
 
-            else if (sgThreadPoolJob==tpjGetStats)
+           else if (sgThreadPoolJob==tpjGetStats)
                GetStatsAsync(sThreadBlockDataStats[inId]);
 
-            #ifdef HXCPP_VISIT_ALLOCS
-            else if (sgThreadPoolJob==tpjVisitBlocks)
+           #ifdef HXCPP_VISIT_ALLOCS
+           else if (sgThreadPoolJob==tpjVisitBlocks)
                VisitBlockAsync(sThreadVisitContext);
-            #endif
+           #endif
 
-            else if (sgThreadPoolJob==tpjAsyncZero)
+           else if (sgThreadPoolJob==tpjAsyncZero)
                ZeroAsync();
 
-            finishThreadJob(inId);
-         }
-      }
-   }
+           else if (sgThreadPoolJob==tpjSweepLarge)
+               LargeSweepAsync(inId);
+
+           finishThreadJob(inId);
+        }
+     }
+  }
 
    static THREAD_FUNC_TYPE SThreadLoop( void *inInfo )
    {
@@ -5386,29 +5423,57 @@ public:
          recycleRemaining = mLargeAllocForceRefresh;
       #endif
 
-      int idx = 0;
-      int l0 = mLargeList.size();
-      while(idx<mLargeList.size())
+      if (sParallelLargeSweepEnabled && MAX_GC_THREADS>1)
       {
-         unsigned int *blob = mLargeList[idx];
-         if ( (blob[1] & IMMIX_ALLOC_MARK_ID) != hx::gMarkID )
+         for(int i=0;i<MAX_GC_THREADS;i++)
+            sThreadLargeUnmarked[i].setSize(0);
+         StartThreadJobs(tpjSweepLarge, mLargeList.size(), true, gGcLargeSweepThreads);
+         for(int i=0;i<MAX_GC_THREADS;i++)
          {
-            unsigned int size = *blob;
-            mLargeAllocated -= size;
-            if (size < recycleRemaining)
+            for(int j=0;j<sThreadLargeUnmarked[i].size();j++)
             {
-               recycleRemaining -= size;
-               largeObjectRecycle.push(blob);
+               unsigned int *blob = sThreadLargeUnmarked[i][j];
+               unsigned int size = *blob;
+               mLargeAllocated -= size;
+               if (size < recycleRemaining)
+               {
+                  recycleRemaining -= size;
+                  largeObjectRecycle.push(blob);
+               }
+               else
+               {
+                  HxFree(blob);
+               }
+               mLargeList.qerase_val(blob);
+            }
+            sThreadLargeUnmarked[i].setSize(0);
+         }
+      }
+      else
+      {
+         int idx = 0;
+         int l0 = mLargeList.size();
+         while(idx<mLargeList.size())
+         {
+            unsigned int *blob = mLargeList[idx];
+            if ( (blob[1] & IMMIX_ALLOC_MARK_ID) != hx::gMarkID )
+            {
+               unsigned int size = *blob;
+               mLargeAllocated -= size;
+               if (size < recycleRemaining)
+               {
+                  recycleRemaining -= size;
+                  largeObjectRecycle.push(blob);
+               }
+               else
+               {
+                  HxFree(blob);
+               }
+               mLargeList.qerase(idx);
             }
             else
-            {
-               HxFree(blob);
-            }
-
-            mLargeList.qerase(idx);
+               idx++;
          }
-         else
-            idx++;
       }
 
       int l1 = mLargeList.size();
@@ -6904,13 +6969,15 @@ void InitAlloc() //inits
    {
       int pg = ReadEnvInt("HX_GC_PARALLEL_THREADS", 2);
       int rt = ReadEnvInt("HX_GC_REFINE_THREADS", 1);
+      int lst = ReadEnvInt("HX_GC_LARGE_SWEEP_THREADS", 1);
       int mp = ReadEnvInt("HX_GC_MAX_PAUSE_MS", 3);
       int pr = ReadEnvBool("HX_GC_PARALLEL_REF_PROC", 1);
       int fs = ReadEnvBool("HX_GC_FORCE_SUSPEND", 0);
       int bd = ReadEnvInt("HX_GC_MINOR_BASE_DELTA_BYTES", 512 * 1024);
       int gm = ReadEnvInt("HX_GC_MINOR_GATE_MS", 250);
       int sb = ReadEnvInt("HX_GC_MINOR_START_BYTES", 8*1024*1024);
-      int lr = ReadEnvBool("HX_GC_LARGE_REFRESH", 1);
+      int lr = ReadEnvBool("HX_GC_LARGE_REFRESH", 0);
+      int ls = ReadEnvBool("HX_GC_PARALLEL_SWEEP_LARGE", 1);
       hx::GCConfig cfg = hx::GetGCConfig();
       cfg.parallelGcThreads = pg;
       cfg.concRefinementThreads = rt;
@@ -6919,11 +6986,13 @@ void InitAlloc() //inits
       hx::SetGCConfig(cfg);
       sForceSuspendSafepoint = fs;
       sLargeAllocRefreshEnabled = lr ? 1 : 0;
+      sParallelLargeSweepEnabled = ls ? 1 : 0;
       sMinorBaseDeltaBytes = bd>0 ? bd : 0;
       sMinorBaselineInit = 0;
       sMinorMinIntervalMs = gm>0 ? gm : 0;
       sMinorInitTime = __hxcpp_time_stamp();
       sMinorStartBytes = sb>0 ? (size_t)sb : 0;
+      gGcLargeSweepThreads = lst>0 ? std::min(lst,(int)MAX_GC_THREADS) : gGcDesiredThreads;
    }
    
    sGlobalAlloc = new GlobalAllocator();
