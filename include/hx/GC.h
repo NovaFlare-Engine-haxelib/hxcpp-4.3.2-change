@@ -88,8 +88,6 @@ inline void _hx_add_finalizable( T *inObj, bool inPin)
   __hxcpp_add_member_finalizer(inObj, finalizer, inPin);
 }
 
-
-
 template<typename T>
 T _hx_allocate_extended(int inExtra)
 {

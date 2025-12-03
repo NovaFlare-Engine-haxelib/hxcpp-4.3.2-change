@@ -130,6 +130,7 @@ static int sForceSuspendSafepoint = 0;
 static size_t __hxcpp_process_used_bytes();
 size_t __hxcpp_gc_working_memory();
 int __hxcpp_gc_reserved_bytes();
+double __hxcpp_gen_retained_estimate();
 
 static volatile int sMinorBaseDeltaBytes = 512 * 1024;
 static size_t sGcMemLineBytes = 0;
@@ -164,8 +165,10 @@ static inline void MaybeMinorCollect()
    if (now - sMinorLastCollect >= (double)sMinorMinIntervalMs/1000.0)
    {
       size_t used = (size_t)__hxcpp_gc_used_bytes();
+      size_t reserved = (size_t)__hxcpp_gc_reserved_bytes();
+      size_t unusedReserved = reserved>used ? (reserved-used) : 0;
       size_t processUsed = (size_t)__hxcpp_process_used_bytes();
-      if (sMinorStartBytes>0 && used < sMinorStartBytes)
+      if (sMinorStartBytes>0 && used < sMinorStartBytes && unusedReserved < (size_t)sMinorBaseDeltaBytes)
          return;
       if (!sMinorBaselineInit)
       {
@@ -176,9 +179,21 @@ static inline void MaybeMinorCollect()
       if (sGcMemLineBytes > used)
          sGcMemLineBytes = used;
       if (sProcessMemLineBytes > processUsed)
-      sProcessMemLineBytes = processUsed;
+         sProcessMemLineBytes = processUsed;
 
-      if (sMinorBaseDeltaBytes>0 && ((used > sGcMemLineBytes + (size_t)sMinorBaseDeltaBytes) || (processUsed > sProcessMemLineBytes + (size_t)sMinorBaseDeltaBytes && ((size_t)__hxcpp_gc_reserved_bytes() > (sWorkingMemorySize + std::max((size_t)8*1024*1024, sWorkingMemorySize*5/4))))))
+      if (
+         sMinorBaseDeltaBytes>0 && (
+            (used > sGcMemLineBytes + (size_t)sMinorBaseDeltaBytes) ||
+            (
+               (processUsed > sProcessMemLineBytes + (size_t)(sMinorBaseDeltaBytes/2)) &&
+               (
+                  ((size_t)__hxcpp_gc_reserved_bytes() > (sWorkingMemorySize + std::max((size_t)8*1024*1024, sWorkingMemorySize*5/4))) ||
+                  (unusedReserved > (size_t)sMinorBaseDeltaBytes) ||
+                  (__hxcpp_gen_retained_estimate() < 0.5 && (unusedReserved > (size_t)sMinorBaseDeltaBytes))
+               )
+            )
+         )
+      )
       {
          sStrictMinorRequested = 0;
          int oldAgg = sForceSuspendSafepoint;
@@ -5271,7 +5286,7 @@ public:
          countRows(stats);
          size_t currentRows = stats.rowsInUse + stats.fraggedRows + freeFraggedRows;
          double filled = (double)(currentRows) / (double)(mAllBlocks.size()*IMMIX_USEFUL_LINES);
-         if (filled>0.85)
+         if (filled>0.9)
          {
             // Failure of generational estimation
             int retained = currentRows - mRowsInUse;
@@ -5321,7 +5336,7 @@ public:
             GCLOG("Row use ratio:%f\n", useRatio);
          #endif
          // Could be either expanding, or fragmented...
-         if (useRatio>0.75)
+         if (useRatio>0.85)
          {
             #if defined(SHOW_FRAGMENTATION) || defined(SHOW_MEM_EVENTS)
                GCLOG("Do full stats\n", useRatio);
@@ -6904,13 +6919,13 @@ void InitAlloc() //inits
    {
       int pg = ReadEnvInt("HX_GC_PARALLEL_THREADS", 2);
       int rt = ReadEnvInt("HX_GC_REFINE_THREADS", 1);
-      int mp = ReadEnvInt("HX_GC_MAX_PAUSE_MS", 3);
+      int mp = ReadEnvInt("HX_GC_MAX_PAUSE_MS", 1);
       int pr = ReadEnvBool("HX_GC_PARALLEL_REF_PROC", 1);
       int fs = ReadEnvBool("HX_GC_FORCE_SUSPEND", 0);
       int bd = ReadEnvInt("HX_GC_MINOR_BASE_DELTA_BYTES", 512 * 1024);
       int gm = ReadEnvInt("HX_GC_MINOR_GATE_MS", 250);
       int sb = ReadEnvInt("HX_GC_MINOR_START_BYTES", 8*1024*1024);
-      int lr = ReadEnvBool("HX_GC_LARGE_REFRESH", 1);
+      int lr = ReadEnvBool("HX_GC_LARGE_REFRESH", 0);
       hx::GCConfig cfg = hx::GetGCConfig();
       cfg.parallelGcThreads = pg;
       cfg.concRefinementThreads = rt;
@@ -7322,6 +7337,13 @@ int   __hxcpp_gc_large_bytes()
 int   __hxcpp_gc_reserved_bytes()
 {
    return sGlobalAlloc->MemReserved();
+}
+
+double __hxcpp_gen_retained_estimate()
+{
+   if (!sGlobalAlloc)
+      return 1.0;
+   return sGlobalAlloc->mGenerationalRetainEstimate;
 }
 
 // Return whole-process memory usage, in bytes
