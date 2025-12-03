@@ -143,6 +143,9 @@ static int    sMinorMinIntervalMs = 250;
 volatile int sMinorCollectRequested = 0;
 double sMinorLastCollect = 0.0;
 static size_t sMinorStartBytes = 8*1024*1024;
+static size_t sPrevReservedBytes = 0;
+static size_t sPrevUsedBytes = 0;
+static size_t sPrevUnusedReserved = 0;
 
 static int sLargeAllocRefreshEnabled = 1;
 
@@ -167,14 +170,21 @@ static inline void MaybeMinorCollect()
       size_t used = (size_t)__hxcpp_gc_used_bytes();
       size_t reserved = (size_t)__hxcpp_gc_reserved_bytes();
       size_t unusedReserved = reserved>used ? (reserved-used) : 0;
+      size_t prevUR = sPrevUnusedReserved;
+      size_t deltaUnusedReserved = unusedReserved>prevUR ? (unusedReserved-prevUR) : 0;
+      size_t prevUsed = sPrevUsedBytes;
+      size_t allocActivity = used>prevUsed ? (used-prevUsed) : 0;
       size_t processUsed = (size_t)__hxcpp_process_used_bytes();
-      if (sMinorStartBytes>0 && used < sMinorStartBytes && unusedReserved < (size_t)sMinorBaseDeltaBytes)
+      if (sMinorStartBytes>0 && used < sMinorStartBytes && unusedReserved < (size_t)sMinorBaseDeltaBytes && deltaUnusedReserved < (size_t)sMinorBaseDeltaBytes)
          return;
       if (!sMinorBaselineInit)
       {
          sGcMemLineBytes = used;
          sProcessMemLineBytes = processUsed;
          sMinorBaselineInit = 1;
+         sPrevReservedBytes = reserved;
+         sPrevUsedBytes = used;
+         sPrevUnusedReserved = unusedReserved;
       }
       if (sGcMemLineBytes > used)
          sGcMemLineBytes = used;
@@ -188,8 +198,8 @@ static inline void MaybeMinorCollect()
                (processUsed > sProcessMemLineBytes + (size_t)(sMinorBaseDeltaBytes/2)) &&
                (
                   ((size_t)__hxcpp_gc_reserved_bytes() > (sWorkingMemorySize + std::max((size_t)8*1024*1024, sWorkingMemorySize*5/4))) ||
-                  (unusedReserved > (size_t)sMinorBaseDeltaBytes) ||
-                  (__hxcpp_gen_retained_estimate() < 0.5 && (unusedReserved > (size_t)sMinorBaseDeltaBytes))
+                  (deltaUnusedReserved > (size_t)sMinorBaseDeltaBytes && allocActivity < (size_t)(sMinorBaseDeltaBytes/4)) ||
+                  (__hxcpp_gen_retained_estimate() < 0.5 && (deltaUnusedReserved > (size_t)sMinorBaseDeltaBytes))
                )
             )
          )
@@ -202,6 +212,9 @@ static inline void MaybeMinorCollect()
          sForceSuspendSafepoint = oldAgg;
       }
 
+      sPrevReservedBytes = reserved;
+      sPrevUsedBytes = used;
+      sPrevUnusedReserved = unusedReserved;
       sMinorLastCollect += (double)sMinorMinIntervalMs / 2;
    }
 }
