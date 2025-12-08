@@ -50,6 +50,10 @@ HXCPP_EXTERN_CLASS_ATTRIBUTES void  __hxcpp_gc_large_refresh_enable(int inEnable
 HXCPP_EXTERN_CLASS_ATTRIBUTES int   __hxcpp_get_minor_gate_ms();
 HXCPP_EXTERN_CLASS_ATTRIBUTES int   __hxcpp_get_minor_start_bytes();
 HXCPP_EXTERN_CLASS_ATTRIBUTES int   __hxcpp_gc_get_large_refresh_enabled();
+HXCPP_EXTERN_CLASS_ATTRIBUTES size_t __hxcpp_gc_get_working_memory_size();
+HXCPP_EXTERN_CLASS_ATTRIBUTES int   __hxcpp_gc_get_target_free_space_percentage();
+HXCPP_EXTERN_CLASS_ATTRIBUTES size_t __hxcpp_gc_garbage_estimate();
+HXCPP_EXTERN_CLASS_ATTRIBUTES size_t __hxcpp_gc_get_last_garbage_estimate();
 
 HXCPP_EXTERN_CLASS_ATTRIBUTES void  __hxcpp_gc_set_threads(int parallelThreads, int refineThreads);
 HXCPP_EXTERN_CLASS_ATTRIBUTES void  __hxcpp_gc_set_max_pause_ms(int inMs);

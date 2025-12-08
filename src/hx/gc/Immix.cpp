@@ -133,21 +133,19 @@ int __hxcpp_gc_reserved_bytes();
 double __hxcpp_gen_retained_estimate();
 
 static volatile int sMinorBaseDeltaBytes = 512 * 1024;
-static size_t sGcMemLineBytes = 0;
-static size_t sProcessMemLineBytes = 0;
-static int    sMinorBaselineInit = 0;
 int    sStrictMinorRequested = 0;
 static double sMinorInitTime = 0.0;
-static int    sMinorAllowTime = 5000;
+static int    sMinorAllowTime = 10000;
 static int    sMinorMinIntervalMs = 250;
-volatile int sMinorCollectRequested = 0;
 double sMinorLastCollect = 0.0;
 static size_t sMinorStartBytes = 8*1024*1024;
-static size_t sPrevReservedBytes = 0;
-static size_t sPrevUsedBytes = 0;
-static size_t sPrevUnusedReserved = 0;
+
+static size_t garbageLine = 0;
 
 static int sLargeAllocRefreshEnabled = 1;
+
+// Forward declaration needed for MaybeMinorCollect
+size_t __hxcpp_gc_garbage_estimate();
 
 static inline void MaybeMinorCollect()
 {
@@ -167,42 +165,15 @@ static inline void MaybeMinorCollect()
 
    if (now - sMinorLastCollect >= (double)sMinorMinIntervalMs/1000.0)
    {
-      size_t used = (size_t)__hxcpp_gc_used_bytes();
-      size_t reserved = (size_t)__hxcpp_gc_reserved_bytes();
-      size_t unusedReserved = reserved>used ? (reserved-used) : 0;
-      size_t prevUR = sPrevUnusedReserved;
-      size_t deltaUnusedReserved = unusedReserved>prevUR ? (unusedReserved-prevUR) : 0;
-      size_t prevUsed = sPrevUsedBytes;
-      size_t allocActivity = used>prevUsed ? (used-prevUsed) : 0;
-      size_t processUsed = (size_t)__hxcpp_process_used_bytes();
-      if (sMinorStartBytes>0 && used < sMinorStartBytes && unusedReserved < (size_t)sMinorBaseDeltaBytes && deltaUnusedReserved < (size_t)sMinorBaseDeltaBytes)
+      size_t garbageEstimate = __hxcpp_gc_garbage_estimate();
+      if (garbageEstimate == 0)
          return;
-      if (!sMinorBaselineInit)
-      {
-         sGcMemLineBytes = used;
-         sProcessMemLineBytes = processUsed;
-         sMinorBaselineInit = 1;
-         sPrevReservedBytes = reserved;
-         sPrevUsedBytes = used;
-         sPrevUnusedReserved = unusedReserved;
-      }
-      if (sGcMemLineBytes > used)
-         sGcMemLineBytes = used;
-      if (sProcessMemLineBytes > processUsed)
-         sProcessMemLineBytes = processUsed;
+         
+      if (garbageLine > garbageEstimate + (size_t)sMinorBaseDeltaBytes / 2)
+         garbageLine = garbageEstimate + (size_t)sMinorBaseDeltaBytes / 2;
 
-      if (
-         sMinorBaseDeltaBytes>0 && (
-            (used > sGcMemLineBytes + (size_t)sMinorBaseDeltaBytes) ||
-            (
-               (processUsed > sProcessMemLineBytes + (size_t)(sMinorBaseDeltaBytes/2)) &&
-               (
-                  ((size_t)__hxcpp_gc_reserved_bytes() > (sWorkingMemorySize + std::max((size_t)8*1024*1024, sWorkingMemorySize*5/4))) ||
-                  (deltaUnusedReserved > (size_t)sMinorBaseDeltaBytes && allocActivity < (size_t)(sMinorBaseDeltaBytes/4)) ||
-                  (__hxcpp_gen_retained_estimate() < 0.5 && (deltaUnusedReserved > (size_t)sMinorBaseDeltaBytes))
-               )
-            )
-         )
+      if (sMinorBaseDeltaBytes > 0 && 
+         garbageEstimate > (size_t)sMinorBaseDeltaBytes + garbageLine
       )
       {
          sStrictMinorRequested = 0;
@@ -212,11 +183,13 @@ static inline void MaybeMinorCollect()
          sForceSuspendSafepoint = oldAgg;
       }
 
-      sPrevReservedBytes = reserved;
-      sPrevUsedBytes = used;
-      sPrevUnusedReserved = unusedReserved;
       sMinorLastCollect += (double)sMinorMinIntervalMs / 2;
    }
+}
+
+size_t __hxcpp_gc_get_last_garbage_estimate()
+{
+   return garbageLine;
 }
 
 int __hxcpp_get_minor_base_delta_bytes()
@@ -227,7 +200,6 @@ int __hxcpp_get_minor_base_delta_bytes()
 void __hxcpp_set_minor_base_delta_bytes(int inBytes)
 {
    sMinorBaseDeltaBytes = inBytes>0 ? inBytes : 0;
-   sMinorBaselineInit = 0;
 }
 /* moved below MAX_GC_THREADS */
 
@@ -480,6 +452,15 @@ int __hxcpp_gc_get_large_refresh_enabled()
 {
    return sLargeAllocRefreshEnabled;
 }
+size_t __hxcpp_gc_get_working_memory_size()
+{
+   return sWorkingMemorySize;
+}
+int __hxcpp_gc_get_target_free_space_percentage()
+{
+   return hx::sgTargetFreeSpacePercentage;
+}
+
 int __hxcpp_gc_get_parallel_threads()
 {
    return hx::GetGCConfig().parallelGcThreads;
@@ -3444,6 +3425,8 @@ public:
       mCurrentRowsInUse = 0;
       mAllBlocksCount = 0;
       mGenerationalRetainEstimate = 0.5;
+      mSurvivalRate = 0.1;
+      mAllocatedSinceLastGC = 0;
       for(int p=0;p<LOCAL_POOL_SIZE;p++)
          mLocalPool[p] = 0;
 
@@ -3705,6 +3688,9 @@ public:
                    else
                    {
                       info->mOwned = true;
+                      
+                      // Track allocations for survival rate estimation
+                      mAllocatedSinceLastGC += info->GetFreeRows() << IMMIX_LINE_BITS;
 
                       // Increase the mNextFreeBlockOfSize
                       int idx = nextFreeBlock;
@@ -5373,6 +5359,19 @@ public:
       size_t oldRowsInUse = mRowsInUse;
       mRowsInUse = stats.rowsInUse + stats.fraggedRows + freeFraggedRows;
 
+      // Update survival rate estimate
+      if (mAllocatedSinceLastGC > 0)
+      {
+          size_t newBytes = (mRowsInUse - oldRowsInUse) << IMMIX_LINE_BITS;
+          double rate = (double)newBytes / (double)mAllocatedSinceLastGC;
+          if (rate < 0) rate = 0;
+          if (rate > 1.0) rate = 1.0;
+          
+          // Use moving average
+          mSurvivalRate = mSurvivalRate * 0.7 + rate * 0.3;
+      }
+      mAllocatedSinceLastGC = 0;
+
       bool moved = false;
 
       #if defined(SHOW_FRAGMENTATION) || defined(SHOW_MEM_EVENTS)
@@ -5624,11 +5623,6 @@ public:
       mAllBlocksCount   = mAllBlocks.size();
       mCurrentRowsInUse = mRowsInUse;
 
-      sGcMemLineBytes = (size_t)__hxcpp_gc_used_bytes();
-      sProcessMemLineBytes = (size_t)__hxcpp_process_used_bytes();
-
-
-
       #ifdef SHOW_MEM_EVENTS
       GCLOG("Collect Done\n");
       #endif
@@ -5842,6 +5836,26 @@ public:
       return mLargeAllocated + (mRowsInUse<<IMMIX_LINE_BITS);
    }
 
+   // Returns the amount of memory that is currently allocated but likely garbage
+   // Calculated as: (New Allocations) * (1 - Survival Rate)
+   size_t MemGarbageEstimate()
+   {
+      size_t current = MemCurrent();
+      size_t usage = MemUsage();
+      if (current > usage)
+      {
+         size_t newAllocations = current - usage;
+         // If we allocated more than tracked (should not happen normally, but for safety)
+         if (newAllocations > mAllocatedSinceLastGC)
+             mAllocatedSinceLastGC = newAllocations;
+
+         // Estimated garbage = New Allocations * (1.0 - Survival Rate)
+         // e.g. if survival rate is 0.1 (10%), then 90% is garbage
+         return (size_t)(newAllocations * (1.0 - mSurvivalRate));
+      }
+      return 0;
+   }
+
    bool IsAllBlock(BlockData *block)
    {
       if (mAllBlocks.size())
@@ -5909,6 +5923,9 @@ public:
    size_t mTotalAfterLastCollect;
    size_t mAllBlocksCount;
    double mGenerationalRetainEstimate;
+
+   double mSurvivalRate;
+   size_t mAllocatedSinceLastGC;
 
    hx::MarkContext mMarker;
 
@@ -6948,7 +6965,6 @@ void InitAlloc() //inits
       sForceSuspendSafepoint = fs;
       sLargeAllocRefreshEnabled = lr ? 1 : 0;
       sMinorBaseDeltaBytes = bd>0 ? bd : 0;
-      sMinorBaselineInit = 0;
       sMinorMinIntervalMs = gm>0 ? gm : 0;
       sMinorInitTime = __hxcpp_time_stamp();
       sMinorStartBytes = sb>0 ? (size_t)sb : 0;
@@ -7066,6 +7082,9 @@ int InternalCollect(bool inMajor,bool inCompact)
        return 0;
 
    GetLocalAlloc()->SetupStackAndCollect(inMajor, inCompact);
+
+   if (sGlobalAlloc)
+       garbageLine = sGlobalAlloc->MemGarbageEstimate();
 
    return sGlobalAlloc->MemUsage();
 }
@@ -7471,6 +7490,11 @@ size_t __hxcpp_gc_working_memory()
 int   __hxcpp_gc_used_bytes()
 {
    return sGlobalAlloc->MemUsage();
+}
+
+size_t __hxcpp_gc_garbage_estimate()
+{
+   return sGlobalAlloc ? sGlobalAlloc->MemGarbageEstimate() : 0;
 }
 
 void  __hxcpp_gc_do_not_kill(Dynamic inObj)
