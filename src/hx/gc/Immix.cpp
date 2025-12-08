@@ -169,8 +169,8 @@ static inline void MaybeMinorCollect()
       if (garbageEstimate == 0)
          return;
          
-      if (garbageLine > garbageEstimate + (size_t)sMinorBaseDeltaBytes / 2)
-         garbageLine = garbageEstimate + (size_t)sMinorBaseDeltaBytes / 2;
+      if (garbageLine > garbageEstimate)
+         garbageLine = garbageEstimate;
 
       if (sMinorBaseDeltaBytes > 0 && 
          garbageEstimate > (size_t)sMinorBaseDeltaBytes + garbageLine
@@ -1030,6 +1030,7 @@ struct BlockDataInfo
    int          mMoveScore;
    int          mUsedBytes;
    int          mFraggedRows;
+   size_t       mBytesAllocatedSinceGC;
    bool         mPinned;
    unsigned char mZeroed;
    bool         mReclaimed;
@@ -1078,6 +1079,7 @@ struct BlockDataInfo
       mUsedRows = 0;
       mUsedBytes = 0;
       mFraggedRows = 0;
+      mBytesAllocatedSinceGC = 0;
       mPinned = false;
       ZERO_MEM(allocStart,sizeof(int)*IMMIX_LINES);
       ZERO_MEM(mPtr->mRowMarked+IMMIX_HEADER_LINES, IMMIX_USEFUL_LINES); 
@@ -5360,16 +5362,7 @@ public:
       mRowsInUse = stats.rowsInUse + stats.fraggedRows + freeFraggedRows;
 
       // Update survival rate estimate
-      if (mAllocatedSinceLastGC > 0)
-      {
-          size_t newBytes = (mRowsInUse - oldRowsInUse) << IMMIX_LINE_BITS;
-          double rate = (double)newBytes / (double)mAllocatedSinceLastGC;
-          if (rate < 0) rate = 0;
-          if (rate > 1.0) rate = 1.0;
-          
-          // Use moving average
-          mSurvivalRate = mSurvivalRate * 0.7 + rate * 0.3;
-      }
+      UpdateSurvivalRate(oldRowsInUse);
       mAllocatedSinceLastGC = 0;
 
       bool moved = false;
@@ -5838,23 +5831,8 @@ public:
 
    // Returns the amount of memory that is currently allocated but likely garbage
    // Calculated as: (New Allocations) * (1 - Survival Rate)
-   size_t MemGarbageEstimate()
-   {
-      size_t current = MemCurrent();
-      size_t usage = MemUsage();
-      if (current > usage)
-      {
-         size_t newAllocations = current - usage;
-         // If we allocated more than tracked (should not happen normally, but for safety)
-         if (newAllocations > mAllocatedSinceLastGC)
-             mAllocatedSinceLastGC = newAllocations;
+   size_t MemGarbageEstimate();
 
-         // Estimated garbage = New Allocations * (1.0 - Survival Rate)
-         // e.g. if survival rate is 0.1 (10%), then 90% is garbage
-         return (size_t)(newAllocations * (1.0 - mSurvivalRate));
-      }
-      return 0;
-   }
 
    bool IsAllBlock(BlockData *block)
    {
@@ -5913,6 +5891,8 @@ public:
 
       return memUnmanaged;
    }
+   
+   void UpdateSurvivalRate(size_t oldRowsInUse);
 
 
    size_t mRowsInUse;
@@ -6156,11 +6136,13 @@ class LocalAllocator : public hx::StackContext
 public:
    bool            mGlobalStackLock;
    int             mStackLocks;
+   size_t          mBytesAllocatedSinceGC;
 
 public:
    LocalAllocator(int *inTopOfStack=0)
    {
       Reset();
+      mBytesAllocatedSinceGC = 0;
 
       #ifdef HXCPP_GC_GENERATIONAL
       mOldReferrers = 0;
@@ -6540,6 +6522,7 @@ public:
 
    void SetupStackAndCollect(bool inMajor, bool inForceCompact, bool inLocked=false,bool inFreeIsFragged=false)
    {
+      mBytesAllocatedSinceGC = 0;
       #ifndef HXCPP_SINGLE_THREADED_APP
         #if HXCPP_DEBUG
         if (mGCFreeZone)
@@ -6641,6 +6624,7 @@ public:
 
                int size = allocSize - 4;
                ((unsigned int *)buffer)[-1] = size | inObjectFlags;
+               mBytesAllocatedSinceGC += size;
 
                #if defined(HXCPP_GC_CHECK_POINTER) && defined(HXCPP_GC_DEBUG_ALWAYS_MOVE)
                hx::GCOnNewPointer(buffer);
@@ -6672,6 +6656,8 @@ public:
                      (inSize<<IMMIX_ALLOC_SIZE_SHIFT) | (endRow-startRow);
 
                spaceStart = end;
+
+               mBytesAllocatedSinceGC += inSize;
 
                #if defined(HXCPP_GC_CHECK_POINTER) && defined(HXCPP_GC_DEBUG_ALWAYS_MOVE)
                hx::GCOnNewPointer(buffer);
@@ -6952,8 +6938,8 @@ void InitAlloc() //inits
       int mp = ReadEnvInt("HX_GC_MAX_PAUSE_MS", 1);
       int pr = ReadEnvBool("HX_GC_PARALLEL_REF_PROC", 1);
       int fs = ReadEnvBool("HX_GC_FORCE_SUSPEND", 0);
-      int bd = ReadEnvInt("HX_GC_MINOR_BASE_DELTA_BYTES", 512 * 1024);
-      int gm = ReadEnvInt("HX_GC_MINOR_GATE_MS", 250);
+      int bd = ReadEnvInt("HX_GC_MINOR_BASE_DELTA_BYTES", 1 * 1024 * 1024);
+      int gm = ReadEnvInt("HX_GC_MINOR_GATE_MS", 500);
       int sb = ReadEnvInt("HX_GC_MINOR_START_BYTES", 8*1024*1024);
       int lr = ReadEnvBool("HX_GC_LARGE_REFRESH", 0);
       hx::GCConfig cfg = hx::GetGCConfig();
@@ -7075,16 +7061,29 @@ void *InternalNew(int inSize,bool inIsObject)
 }
 
 
+static bool sEnableGCLog = false;
+void __hxcpp_gc_enable_log(bool enable) {
+    sEnableGCLog = enable;
+}
+
 // Force global collection - should only be called from 1 thread.
 int InternalCollect(bool inMajor,bool inCompact)
 {
    if (!sgAllocInit)
        return 0;
 
+   if (sEnableGCLog) {
+       size_t used = sGlobalAlloc ? sGlobalAlloc->MemUsage() : 0;
+       size_t reserved = sGlobalAlloc ? sGlobalAlloc->MemReserved() : 0;
+       size_t garbage = sGlobalAlloc ? sGlobalAlloc->MemGarbageEstimate() : 0;
+       GCLOG("[GC] InternalCollect triggered. Major: %d, Compact: %d, Used: %zu, Reserved: %zu, Est.Garbage: %zu\n", 
+           inMajor, inCompact, used, reserved, garbage);
+   }
+
    GetLocalAlloc()->SetupStackAndCollect(inMajor, inCompact);
 
    if (sGlobalAlloc)
-       garbageLine = sGlobalAlloc->MemGarbageEstimate();
+       sLastGarbageEstimate = sGlobalAlloc->MemGarbageEstimate();
 
    return sGlobalAlloc->MemUsage();
 }
@@ -7487,7 +7486,50 @@ size_t __hxcpp_gc_working_memory()
    return sGlobalAlloc ? sGlobalAlloc->GetWorkingMemory() : 0;
 }
 
-int   __hxcpp_gc_used_bytes()
+size_t GlobalAllocator::MemGarbageEstimate()
+   {
+      size_t newAllocations = mAllocatedSinceLastGC;
+      
+      // Add up allocations from all threads
+      for(int i=0; i<mLocalAllocs.size(); i++)
+         if (mLocalAllocs[i])
+            newAllocations += mLocalAllocs[i]->mBytesAllocatedSinceGC;
+
+      // Estimated garbage = New Allocations * (1.0 - Survival Rate)
+      return (size_t)(newAllocations * (1.0 - mSurvivalRate));
+   }
+
+void GlobalAllocator::UpdateSurvivalRate(size_t oldRowsInUse)
+{
+      size_t totalAllocated = 0;
+      for(int i=0; i<mLocalAllocs.size(); i++)
+      {
+         if (mLocalAllocs[i])
+         {
+             totalAllocated += mLocalAllocs[i]->mBytesAllocatedSinceGC;
+             mLocalAllocs[i]->mBytesAllocatedSinceGC = 0;
+         }
+      }
+      // If using Block-based fallback
+      if (totalAllocated == 0 && mAllocatedSinceLastGC > 0)
+          totalAllocated = mAllocatedSinceLastGC;
+
+      if (totalAllocated > 0)
+      {
+          size_t newBytes = (mRowsInUse - oldRowsInUse) << IMMIX_LINE_BITS;
+          // Protect against overflow/underflow if newBytes > totalAllocated (rare but possible with fragmentation)
+          if (newBytes > totalAllocated) newBytes = totalAllocated;
+
+          double rate = (double)newBytes / (double)totalAllocated;
+          if (rate < 0) rate = 0;
+          if (rate > 1.0) rate = 1.0;
+          
+          // Use moving average
+          mSurvivalRate = mSurvivalRate * 0.7 + rate * 0.3;
+      }
+}
+
+   int   __hxcpp_gc_used_bytes()
 {
    return sGlobalAlloc->MemUsage();
 }
