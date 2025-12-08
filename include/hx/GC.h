@@ -55,6 +55,9 @@ HXCPP_EXTERN_CLASS_ATTRIBUTES int   __hxcpp_gc_get_target_free_space_percentage(
 HXCPP_EXTERN_CLASS_ATTRIBUTES size_t __hxcpp_gc_garbage_estimate();
 HXCPP_EXTERN_CLASS_ATTRIBUTES size_t __hxcpp_gc_get_last_garbage_estimate();
 
+HXCPP_EXTERN_CLASS_ATTRIBUTES void  __hxcpp_gc_enable_log(bool enable);
+HXCPP_EXTERN_CLASS_ATTRIBUTES void  __hxcpp_gc_set_callback(Dynamic inFunc);
+
 HXCPP_EXTERN_CLASS_ATTRIBUTES void  __hxcpp_gc_set_threads(int parallelThreads, int refineThreads);
 HXCPP_EXTERN_CLASS_ATTRIBUTES void  __hxcpp_gc_set_max_pause_ms(int inMs);
 HXCPP_EXTERN_CLASS_ATTRIBUTES void  __hxcpp_gc_aggressive_safepoint(int inEnable);
@@ -480,12 +483,14 @@ typedef ImmixAllocator Ctx;
 
 #ifdef HXCPP_GC_GENERATIONAL
   #define HX_OBJ_WB_CTX(obj,value,ctx) { \
+        (ctx)->mWriteBarrierCount++; \
         unsigned char &mark =  ((unsigned char *)(obj))[ HX_ENDIAN_MARK_ID_BYTE]; \
         if (mark == hx::gByteMarkID && value && !((unsigned char *)(value))[ HX_ENDIAN_MARK_ID_BYTE  ] ) { \
             mark|=HX_GC_REMEMBERED; \
             ctx->pushReferrer(obj); \
      } }
   #define HX_OBJ_WB_PESSIMISTIC_CTX(obj,ctx) { \
+     (ctx)->mWriteBarrierCount++; \
      unsigned char &mark =  ((unsigned char *)(obj))[ HX_ENDIAN_MARK_ID_BYTE]; \
      if (mark == hx::gByteMarkID)  { \
         mark|=HX_GC_REMEMBERED; \
@@ -496,8 +501,8 @@ typedef ImmixAllocator Ctx;
      if (((unsigned char *)(obj))[ HX_ENDIAN_MARK_ID_BYTE]==hx::gByteMarkID) hx::NewMarkedObject(obj); \
   }
 #else
-  #define HX_OBJ_WB_CTX(obj,value,ctx)
-  #define HX_OBJ_WB_PESSIMISTIC_CTX(obj,ctx)
+  #define HX_OBJ_WB_CTX(obj,value,ctx) (ctx)->mWriteBarrierCount++;
+  #define HX_OBJ_WB_PESSIMISTIC_CTX(obj,ctx) (ctx)->mWriteBarrierCount++;
   #define HX_OBJ_WB_NEW_MARKED_OBJECT(obj)
 #endif
 
