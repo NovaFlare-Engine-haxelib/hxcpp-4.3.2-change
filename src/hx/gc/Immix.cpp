@@ -17,6 +17,8 @@
 
 #include <string>
 #include <stdlib.h>
+#include <stdarg.h>
+#include <stdio.h>
 #ifndef HX_WINDOWS
 #include <unistd.h>
 #endif
@@ -144,9 +146,39 @@ static size_t sLastGarbageEstimate = 0;
 static size_t sLastReservedBytes = 0;
 
 static hx::Object *sGcCallback = 0;
+static hx::Object *sLogCallback = 0;
 
 static int sLargeAllocRefreshEnabled = 1;
-static bool sEnableGCLog = true;
+static bool sEnableGCLog = false;
+static bool sEnableMinorGC = true;
+
+void GCLog(const char *fmt, ...)
+{
+   va_list args;
+   va_start(args, fmt);
+   vprintf(fmt, args);
+   va_end(args);
+
+   if (sLogCallback)
+   {
+      static bool inside = false;
+      if (inside) return;
+      inside = true;
+      
+      va_start(args, fmt);
+      char buffer[2048];
+      vsnprintf(buffer, 2048, fmt, args);
+      va_end(args);
+      
+      try {
+         String s(buffer);
+         Dynamic d(sLogCallback);
+         d(s);
+      } catch(...) {}
+      
+      inside = false;
+   }
+}
 
 // Forward declaration needed for MaybeMinorCollect
 size_t __hxcpp_gc_garbage_estimate();
@@ -154,6 +186,7 @@ size_t __hxcpp_gc_get_reserved_bytes();
 
 static inline void MaybeMinorCollect()
 {
+   if (!sEnableMinorGC) return;
    if (!sgAllocInit)
       return;
    if (!sgInternalEnable)
@@ -179,9 +212,9 @@ static inline void MaybeMinorCollect()
           if (growth > 1 * 1024 * 1024)
           {
              if (sEnableGCLog)
-             {
-                printf("[MinorGC Check] Heap Expanded (+%.2f MB). Skipping GC.\n", growth/1024.0/1024.0);
-             }
+          {
+             GCLog("[MinorGC Check] Heap Expanded (+%.2f MB). Skipping GC.\n", growth/1024.0/1024.0);
+          }
              sLastReservedBytes = reserved;
              sMinorLastCollect = now;
              return;
@@ -7114,9 +7147,13 @@ void *InternalNew(int inSize,bool inIsObject)
 }
 
 
-static bool sEnableGCLog = true;
+static bool sEnableGCLog = false;
 void __hxcpp_gc_enable_log(bool enable) {
     sEnableGCLog = enable;
+}
+
+void __hxcpp_gc_enable_minor(bool enable) {
+    sEnableMinorGC = enable;
 }
 
 void __hxcpp_gc_set_callback(Dynamic inFunc)
@@ -7128,6 +7165,18 @@ void __hxcpp_gc_set_callback(Dynamic inFunc)
     if (inFunc.mPtr) {
         sGcCallback = inFunc.mPtr;
         hx::GCAddRoot(&sGcCallback);
+    }
+}
+
+void __hxcpp_gc_set_log_callback(Dynamic inFunc)
+{
+    if (sLogCallback) {
+        hx::GCRemoveRoot(&sLogCallback);
+        sLogCallback = 0;
+    }
+    if (inFunc.mPtr) {
+        sLogCallback = inFunc.mPtr;
+        hx::GCAddRoot(&sLogCallback);
     }
 }
 
@@ -7143,7 +7192,7 @@ int InternalCollect(bool inMajor,bool inCompact)
        double garbage = sGlobalAlloc ? (double)sGlobalAlloc->MemGarbageEstimate() / 1024.0 / 1024.0 : 0.0;
        int threads = hx::GetGCConfig().parallelGcThreads;
        int refine = hx::GetGCConfig().concRefinementThreads;
-       printf("[GC] InternalCollect triggered. Major: %d, Compact: %d, Threads: %d, Refine: %d, Used: %.2f MB, Reserved: %.2f MB, Est.Garbage: %.2f MB\n", 
+       GCLog("[GC] InternalCollect triggered. Major: %d, Compact: %d, Threads: %d, Refine: %d, Used: %.2f MB, Reserved: %.2f MB, Est.Garbage: %.2f MB\n", 
            inMajor, inCompact, threads, refine, used, reserved, garbage);
    }
 
