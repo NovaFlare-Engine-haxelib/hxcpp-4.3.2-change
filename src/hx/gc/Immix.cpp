@@ -141,6 +141,7 @@ double sMinorLastCollect = 0.0;
 static size_t sMinorStartBytes = 8*1024*1024;
 
 static size_t sLastGarbageEstimate = 0;
+static size_t sLastReservedBytes = 0;
 
 static hx::Object *sGcCallback = 0;
 
@@ -149,6 +150,7 @@ static bool sEnableGCLog = true;
 
 // Forward declaration needed for MaybeMinorCollect
 size_t __hxcpp_gc_garbage_estimate();
+size_t __hxcpp_gc_get_reserved_bytes();
 
 static inline void MaybeMinorCollect()
 {
@@ -168,6 +170,28 @@ static inline void MaybeMinorCollect()
 
    if (now - sMinorLastCollect >= (double)sMinorMinIntervalMs/1000.0)
    {
+      size_t reserved = __hxcpp_gc_get_reserved_bytes();
+      if (reserved > sLastReservedBytes)
+      {
+          size_t growth = reserved - sLastReservedBytes;
+          // Only skip if growth is significant (> 1MB)
+          // This prevents small allocations from blocking GC, while allowing heavy loading to proceed smoothly.
+          if (growth > 1 * 1024 * 1024)
+          {
+             if (sEnableGCLog)
+             {
+                printf("[MinorGC Check] Heap Expanded (+%.2f MB). Skipping GC.\n", growth/1024.0/1024.0);
+             }
+             sLastReservedBytes = reserved;
+             sMinorLastCollect = now;
+             return;
+          }
+          // Update baseline for small growth, but proceed to check garbage
+          sLastReservedBytes = reserved;
+      }
+      if (reserved < sLastReservedBytes)
+          sLastReservedBytes = reserved;
+
       size_t garbageEstimate = __hxcpp_gc_garbage_estimate();
       
       // Log for debug
@@ -6950,8 +6974,20 @@ void InitAlloc() //inits
    sgAllocInit = true;
    InitGcThreadConfig();
    {
-      int pg = ReadEnvInt("HX_GC_PARALLEL_THREADS", 2);
-      int rt = ReadEnvInt("HX_GC_REFINE_THREADS", 1);
+      int cpuCores = 4;
+      #ifdef HX_WINDOWS
+         SYSTEM_INFO sysinfo;
+         GetSystemInfo(&sysinfo);
+         cpuCores = sysinfo.dwNumberOfProcessors;
+      #elif defined(HX_LINUX) || defined(HX_MACOS) || defined(EMSCRIPTEN) || defined(HX_ANDROID)
+         #if defined(_SC_NPROCESSORS_ONLN)
+            cpuCores = sysconf(_SC_NPROCESSORS_ONLN);
+         #endif
+      #endif
+      if (cpuCores < 1) cpuCores = 1;
+
+      int pg = ReadEnvInt("HX_GC_PARALLEL_THREADS", cpuCores);
+      int rt = ReadEnvInt("HX_GC_REFINE_THREADS", cpuCores/4 > 0 ? cpuCores/4 : 1);
       int mp = ReadEnvInt("HX_GC_MAX_PAUSE_MS", 1);
       int pr = ReadEnvBool("HX_GC_PARALLEL_REF_PROC", 1);
       int fs = ReadEnvBool("HX_GC_FORCE_SUSPEND", 0);
@@ -7105,8 +7141,10 @@ int InternalCollect(bool inMajor,bool inCompact)
        double used = sGlobalAlloc ? (double)sGlobalAlloc->MemUsage() / 1024.0 / 1024.0 : 0.0;
        double reserved = sGlobalAlloc ? (double)sGlobalAlloc->MemReserved() / 1024.0 / 1024.0 : 0.0;
        double garbage = sGlobalAlloc ? (double)sGlobalAlloc->MemGarbageEstimate() / 1024.0 / 1024.0 : 0.0;
-       printf("[GC] InternalCollect triggered. Major: %d, Compact: %d, Used: %.2f MB, Reserved: %.2f MB, Est.Garbage: %.2f MB\n", 
-           inMajor, inCompact, used, reserved, garbage);
+       int threads = hx::GetGCConfig().parallelGcThreads;
+       int refine = hx::GetGCConfig().concRefinementThreads;
+       printf("[GC] InternalCollect triggered. Major: %d, Compact: %d, Threads: %d, Refine: %d, Used: %.2f MB, Reserved: %.2f MB, Est.Garbage: %.2f MB\n", 
+           inMajor, inCompact, threads, refine, used, reserved, garbage);
    }
 
    GetLocalAlloc()->SetupStackAndCollect(inMajor, inCompact);
@@ -7567,6 +7605,11 @@ void GlobalAllocator::UpdateSurvivalRate(size_t oldRowsInUse)
           // Use moving average
           mSurvivalRate = mSurvivalRate * 0.7 + rate * 0.3;
       }
+}
+
+size_t __hxcpp_gc_get_reserved_bytes()
+{
+   return sGlobalAlloc ? sGlobalAlloc->MemReserved() : 0;
 }
 
    int   __hxcpp_gc_used_bytes()
