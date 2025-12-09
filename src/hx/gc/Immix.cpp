@@ -145,6 +145,7 @@ static size_t sLastGarbageEstimate = 0;
 static hx::Object *sGcCallback = 0;
 
 static int sLargeAllocRefreshEnabled = 1;
+static bool sEnableGCLog = true;
 
 // Forward declaration needed for MaybeMinorCollect
 size_t __hxcpp_gc_garbage_estimate();
@@ -168,6 +169,18 @@ static inline void MaybeMinorCollect()
    if (now - sMinorLastCollect >= (double)sMinorMinIntervalMs/1000.0)
    {
       size_t garbageEstimate = __hxcpp_gc_garbage_estimate();
+      
+      // Log for debug
+      if (sEnableGCLog)
+      {
+         /*
+         printf("[MinorGC Check] Garbage: %.2f KB, Threshold: %.2f KB, Base: %.2f KB\n", 
+               (double)garbageEstimate/1024.0, 
+               (double)((size_t)sMinorBaseDeltaBytes + sLastGarbageEstimate)/1024.0,
+               (double)sLastGarbageEstimate/1024.0);
+         */
+      }
+
       if (garbageEstimate == 0)
          return;
          
@@ -185,7 +198,7 @@ static inline void MaybeMinorCollect()
          sForceSuspendSafepoint = oldAgg;
       }
 
-      sMinorLastCollect += (double)sMinorMinIntervalMs / 2;
+      sMinorLastCollect = now;
    }
 }
 
@@ -6147,7 +6160,6 @@ public:
    {
       Reset();
       mBytesAllocatedSinceGC = 0;
-      mWriteBarrierCount = 0;
 
       #ifdef HXCPP_GC_GENERATIONAL
       mOldReferrers = 0;
@@ -6943,7 +6955,7 @@ void InitAlloc() //inits
       int mp = ReadEnvInt("HX_GC_MAX_PAUSE_MS", 1);
       int pr = ReadEnvBool("HX_GC_PARALLEL_REF_PROC", 1);
       int fs = ReadEnvBool("HX_GC_FORCE_SUSPEND", 0);
-      int bd = ReadEnvInt("HX_GC_MINOR_BASE_DELTA_BYTES", 1 * 1024 * 1024);
+      int bd = ReadEnvInt("HX_GC_MINOR_BASE_DELTA_BYTES", 8 * 1024 * 1024);
       int gm = ReadEnvInt("HX_GC_MINOR_GATE_MS", 500);
       int sb = ReadEnvInt("HX_GC_MINOR_START_BYTES", 8*1024*1024);
       int lr = ReadEnvBool("HX_GC_LARGE_REFRESH", 0);
@@ -7090,10 +7102,10 @@ int InternalCollect(bool inMajor,bool inCompact)
        return 0;
 
    if (sEnableGCLog) {
-       size_t used = sGlobalAlloc ? sGlobalAlloc->MemUsage() : 0;
-       size_t reserved = sGlobalAlloc ? sGlobalAlloc->MemReserved() : 0;
-       size_t garbage = sGlobalAlloc ? sGlobalAlloc->MemGarbageEstimate() : 0;
-       GCLOG("[GC] InternalCollect triggered. Major: %d, Compact: %d, Used: %zu, Reserved: %zu, Est.Garbage: %zu\n", 
+       double used = sGlobalAlloc ? (double)sGlobalAlloc->MemUsage() / 1024.0 / 1024.0 : 0.0;
+       double reserved = sGlobalAlloc ? (double)sGlobalAlloc->MemReserved() / 1024.0 / 1024.0 : 0.0;
+       double garbage = sGlobalAlloc ? (double)sGlobalAlloc->MemGarbageEstimate() / 1024.0 / 1024.0 : 0.0;
+       printf("[GC] InternalCollect triggered. Major: %d, Compact: %d, Used: %.2f MB, Reserved: %.2f MB, Est.Garbage: %.2f MB\n", 
            inMajor, inCompact, used, reserved, garbage);
    }
 
@@ -7108,8 +7120,8 @@ int InternalCollect(bool inMajor,bool inCompact)
          double used = sGlobalAlloc ? (double)sGlobalAlloc->MemUsage() : 0;
          double reserved = sGlobalAlloc ? (double)sGlobalAlloc->MemReserved() : 0;
          double garbage = (double)sLastGarbageEstimate;
-         Dynamic callback(sGcCallback);
-         callback(inMajor, used, reserved, garbage);
+         Dynamic d(sGcCallback);
+         d(inMajor, used, reserved, garbage);
       } catch(...) { }
    }
 
@@ -7517,21 +7529,14 @@ size_t __hxcpp_gc_working_memory()
 size_t GlobalAllocator::MemGarbageEstimate()
    {
       size_t newAllocations = mAllocatedSinceLastGC;
-      size_t writeBarriers = 0;
       
       // Add up allocations from all threads
       for(int i=0; i<mLocalAllocs.size(); i++)
-      {
-         if (mLocalAllocs[i]) {
+         if (mLocalAllocs[i])
             newAllocations += mLocalAllocs[i]->mBytesAllocatedSinceGC;
-            writeBarriers += mLocalAllocs[i]->mWriteBarrierCount;
-         }
-      }
 
-      // Estimated garbage = (New Allocations * (1.0 - Survival Rate)) + (Write Barriers * 32 bytes)
-      size_t est = (size_t)(newAllocations * (1.0 - mSurvivalRate));
-      est += writeBarriers * 32;
-      return est;
+      // Estimated garbage = New Allocations * (1.0 - Survival Rate)
+      return (size_t)(newAllocations * (1.0 - mSurvivalRate));
    }
 
 void GlobalAllocator::UpdateSurvivalRate(size_t oldRowsInUse)
@@ -7543,7 +7548,6 @@ void GlobalAllocator::UpdateSurvivalRate(size_t oldRowsInUse)
          {
              totalAllocated += mLocalAllocs[i]->mBytesAllocatedSinceGC;
              mLocalAllocs[i]->mBytesAllocatedSinceGC = 0;
-             mLocalAllocs[i]->mWriteBarrierCount = 0;
          }
       }
       // If using Block-based fallback

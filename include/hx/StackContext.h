@@ -453,8 +453,6 @@ struct StackContext : public hx::ImmixAllocator
       #endif
    #endif
 
-   size_t mWriteBarrierCount;
-
    StackContext();
    ~StackContext();
    void onThreadAttach();
