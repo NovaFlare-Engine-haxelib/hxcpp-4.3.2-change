@@ -24,7 +24,7 @@
 #endif
 
 
-static bool sgIsCollecting = false;
+static volatile int sgIsCollectingFlag = 0;
 
 namespace hx
 {
@@ -128,6 +128,7 @@ static size_t sgMaximumFreeSpace  = 1024*1024*1024;
 class GlobalAllocator;
 extern GlobalAllocator *sGlobalAlloc;
 int __hxcpp_gc_large_bytes();
+int __hxcpp_gc_large_refresh_threshold();
 static int sForceSuspendSafepoint = 0;
 static size_t __hxcpp_process_used_bytes();
 size_t __hxcpp_gc_working_memory();
@@ -141,6 +142,7 @@ static int    sMinorAllowTime = 10000;
 static int    sMinorMinIntervalMs = 250;
 double sMinorLastCollect = 0.0;
 static size_t sMinorStartBytes = 8*1024*1024;
+static int    sSpinBackoffThreshold = 0;
 
 static size_t sLastGarbageEstimate = 0;
 static size_t sLastReservedBytes = 0;
@@ -149,6 +151,7 @@ static hx::Object *sGcCallback = 0;
 static hx::Object *sLogCallback = 0;
 
 static int sLargeAllocRefreshEnabled = 1;
+static int sMinorLargeRefreshEnabled = 1;
 static bool sEnableGCLog = false;
 static bool sEnableMinorGC = true;
 
@@ -194,7 +197,7 @@ static inline void MaybeMinorCollect()
    double now = __hxcpp_time_stamp();
    if (now - sMinorInitTime < (double)sMinorAllowTime/1000.0)
       return;
-   if (sgIsCollecting)
+   if (sgIsCollectingFlag)
       return;
    if (hx::gPauseForCollect)
       return;
@@ -220,7 +223,27 @@ static inline void MaybeMinorCollect()
              return;
           }
           // Update baseline for small growth, but proceed to check garbage
-          sLastReservedBytes = reserved;
+         sLastReservedBytes = reserved;
+      }
+      if (sMinorLargeRefreshEnabled && sgAllocInit && !sgIsCollectingFlag)
+      {
+         size_t largeAlloc = (size_t)__hxcpp_gc_large_bytes();
+         size_t refreshThreshold = (size_t)__hxcpp_gc_large_refresh_threshold();
+         if (largeAlloc > refreshThreshold)
+         {
+            if (sEnableGCLog)
+            {
+             GCLog("[MinorGC Check] Large bytes exceeded (%.2f MB > %.2f MB). Collect.\n",
+                   largeAlloc/1024.0/1024.0, refreshThreshold/1024.0/1024.0);
+            }
+            sStrictMinorRequested = 0;
+            int oldAgg = sForceSuspendSafepoint;
+            sForceSuspendSafepoint = 1;
+            __hxcpp_collect(false);
+            sForceSuspendSafepoint = oldAgg;
+            sMinorLastCollect = now;
+            return;
+         }
       }
       if (reserved < sLastReservedBytes)
           sLastReservedBytes = reserved;
@@ -512,6 +535,10 @@ void __hxcpp_gc_large_refresh_enable(int enable)
 {
    sLargeAllocRefreshEnabled = enable ? 1 : 0;
 }
+void __hxcpp_gc_minor_large_refresh_enable(int enable)
+{
+   sMinorLargeRefreshEnabled = enable ? 1 : 0;
+}
 int __hxcpp_get_minor_gate_ms()
 {
    return sMinorMinIntervalMs;
@@ -523,6 +550,10 @@ int __hxcpp_get_minor_start_bytes()
 int __hxcpp_gc_get_large_refresh_enabled()
 {
    return sLargeAllocRefreshEnabled;
+}
+int __hxcpp_gc_get_minor_large_refresh_enabled()
+{
+   return sMinorLargeRefreshEnabled;
 }
 size_t __hxcpp_gc_get_working_memory_size()
 {
@@ -900,6 +931,12 @@ MID = HX_ENDIAN_MARK_ID_BYTE = is measured from the object pointer
 #endif
 
 
+#ifndef HXCPP_SINGLE_THREADED_APP
+#else
+#endif
+
+static const char* hx_format_bytes(size_t bytes);
+
 void CriticalGCError(const char *inMessage)
 {
    // Can't perfrom normal handling because it needs the GC system
@@ -910,6 +947,14 @@ void CriticalGCError(const char *inMessage)
    #else
    printf("Critical Error: %s\n", inMessage);
    #endif
+
+   size_t reserved = __hxcpp_gc_get_reserved_bytes();
+   int large = __hxcpp_gc_large_bytes();
+   size_t proc = __hxcpp_process_used_bytes();
+   GCLOG("GC status: reserved=%s large=%s process=%s\n",
+         hx_format_bytes(reserved),
+         hx_format_bytes((size_t)large),
+         hx_format_bytes(proc));
 
    DebuggerTrap();
 }
@@ -2019,12 +2064,24 @@ struct GlobalChunks
       if (inChunk)
          release(inChunk);
 
+      int spinCounter1 = 0;
       while(_hx_atomic_compare_exchange(&processListPopLock, 0, 1) != 0)
       {
-         // Spin
          #ifdef PROFILE_THREAD_USAGE
          _hx_atomic_add(&sSpinCount, 1);
          #endif
+         if (sSpinBackoffThreshold>0)
+         {
+            if (++spinCounter1 >= sSpinBackoffThreshold)
+            {
+               #ifdef HX_WINDOWS
+               Sleep(0);
+               #else
+               usleep(0);
+               #endif
+               spinCounter1 = 0;
+            }
+         }
       }
 
       while(true)
@@ -2102,12 +2159,24 @@ struct GlobalChunks
 
    inline MarkChunk *alloc()
    {
+      int spinCounter2 = 0;
       while(_hx_atomic_compare_exchange(&freeListPopLock, 0, 1) != 0)
       {
-         // Spin
          #ifdef PROFILE_THREAD_USAGE
          _hx_atomic_add(&sSpinCount, 1);
          #endif
+         if (sSpinBackoffThreshold>0)
+         {
+            if (++spinCounter2 >= sSpinBackoffThreshold)
+            {
+               #ifdef HX_WINDOWS
+               Sleep(0);
+               #else
+               usleep(0);
+               #endif
+               spinCounter2 = 0;
+            }
+         }
       }
 
       while(true)
@@ -3580,7 +3649,9 @@ public:
             HxFree(blob);
             return;
          }
+         mLargeRecycleLock.Lock();
          largeObjectRecycle.push(blob);
+         mLargeRecycleLock.Unlock();
          mLargeListLock.Unlock();
       }
    }
@@ -3616,6 +3687,7 @@ public:
       bool isLocked = false;
 
 
+      mLargeRecycleLock.Lock();
       if (largeObjectRecycle.size())
       {
          for(int i=0;i<largeObjectRecycle.size();i++)
@@ -3638,6 +3710,7 @@ public:
             }
          }
       }
+      mLargeRecycleLock.Unlock();
 
       if (!result)
          result = (unsigned int *)HxAlloc(inSize + sizeof(int)*2);
@@ -3720,6 +3793,40 @@ public:
 
       if (do_lock)
          mLargeListLock.Unlock();
+   }
+
+   void VerifyBasicConsistency()
+   {
+      int bad = 0;
+      for(int i=1;i<mAllBlocks.size();i++)
+      {
+         if (mAllBlocks[i-1]->mPtr >= mAllBlocks[i]->mPtr)
+            bad++;
+      }
+      if (bad)
+      {
+         GCLOG("GC verify: block order errors=%d\n", bad);
+      }
+      int rbad = 0;
+      for(int i=0;i<largeObjectRecycle.size();i++)
+      {
+         unsigned int *blob = largeObjectRecycle[i];
+         if (!blob) { rbad++; continue; }
+         unsigned int size = *blob;
+         if (size==0 || size> (1u<<30)) rbad++;
+      }
+      int lbad = 0;
+      for(int i=0;i<mLargeList.size();i++)
+      {
+         unsigned int *blob = mLargeList[i];
+         if (!blob) { lbad++; continue; }
+         unsigned int size = *blob;
+         if (size==0 || size> (1u<<30)) lbad++;
+      }
+      if (rbad || lbad)
+      {
+         GCLOG("GC verify: large lists errors recyc=%d live=%d\n", rbad, lbad);
+      }
    }
 
    // Gets a block with the 'zeroLock' acquired, which means the zeroing thread
@@ -5249,7 +5356,7 @@ public:
             WaitForSafe(mLocalAllocs[i]);
       #endif
 
-      sgIsCollecting = true;
+      sgIsCollectingFlag = 1;
 
       StopThreadJobs(true);
       #ifdef HXCPP_DEBUG
@@ -5469,10 +5576,12 @@ public:
 
       // Manage recycle size ?
       //  clear old frames recycle objects
+      mLargeRecycleLock.Lock();
       int l2 = largeObjectRecycle.size();
       for(int i=0;i<largeObjectRecycle.size();i++)
          HxFree(largeObjectRecycle[i]);
       largeObjectRecycle.setSize(0);
+      mLargeRecycleLock.Unlock();
 
       size_t recycleRemaining = 0;
       #ifdef RECYCLE_LARGE
@@ -5750,7 +5859,7 @@ public:
       __hxt_gc_end();
       #endif
 
-      sgIsCollecting = false;
+      sgIsCollectingFlag = 0;
 
 
       hx::gPauseForCollect = 0x00000000;
@@ -5993,6 +6102,7 @@ public:
 
    LargeList mLargeList;
    HxMutex    mLargeListLock;
+   HxMutex    mLargeRecycleLock;
    hx::QuickVec<LocalAllocator *> mLocalAllocs;
    LocalAllocator *mLocalPool[LOCAL_POOL_SIZE];
    hx::QuickVec<unsigned int *> largeObjectRecycle;
@@ -6444,7 +6554,7 @@ public:
       VerifyStackRead(mBottomOfStack, mTopOfStack)
       #endif
 
-      if (sgIsCollecting)
+      if (sgIsCollectingFlag)
          CriticalGCError("Bad Allocation while collecting - from finalizer?");
 
       mReadyForCollect.Set();
@@ -7024,10 +7134,12 @@ void InitAlloc() //inits
       int mp = ReadEnvInt("HX_GC_MAX_PAUSE_MS", 1);
       int pr = ReadEnvBool("HX_GC_PARALLEL_REF_PROC", 1);
       int fs = ReadEnvBool("HX_GC_FORCE_SUSPEND", 0);
-      int bd = ReadEnvInt("HX_GC_MINOR_BASE_DELTA_BYTES", 8 * 1024 * 1024);
+      int bd = ReadEnvInt("HX_GC_MINOR_BASE_DELTA_BYTES", 10 * 1024 * 1024);
       int gm = ReadEnvInt("HX_GC_MINOR_GATE_MS", 500);
       int sb = ReadEnvInt("HX_GC_MINOR_START_BYTES", 8*1024*1024);
       int lr = ReadEnvBool("HX_GC_LARGE_REFRESH", 0);
+      int sbt = ReadEnvInt("HX_GC_SPIN_BACKOFF", 0);
+      int mlr = ReadEnvBool("HX_GC_MINOR_LARGE_REFRESH", 1);
       hx::GCConfig cfg = hx::GetGCConfig();
       cfg.parallelGcThreads = pg;
       cfg.concRefinementThreads = rt;
@@ -7036,10 +7148,12 @@ void InitAlloc() //inits
       hx::SetGCConfig(cfg);
       sForceSuspendSafepoint = fs;
       sLargeAllocRefreshEnabled = lr ? 1 : 0;
+      sMinorLargeRefreshEnabled = mlr ? 1 : 0;
       sMinorBaseDeltaBytes = bd>0 ? bd : 0;
       sMinorMinIntervalMs = gm>0 ? gm : 0;
       sMinorInitTime = __hxcpp_time_stamp();
       sMinorStartBytes = sb>0 ? (size_t)sb : 0;
+      sSpinBackoffThreshold = sbt>0 ? sbt : 0;
    }
    
    sGlobalAlloc = new GlobalAllocator();
@@ -7492,6 +7606,18 @@ int   __hxcpp_gc_large_bytes()
    return sGlobalAlloc->MemLarge();
 }
 
+int   __hxcpp_gc_large_refresh_threshold()
+{
+   if (!sGlobalAlloc) return 0;
+   return (int)sGlobalAlloc->mLargeAllocForceRefresh;
+}
+
+void  __hxcpp_gc_verify_consistency(int level)
+{
+   if (!sGlobalAlloc) return;
+   sGlobalAlloc->VerifyBasicConsistency();
+}
+
 int   __hxcpp_gc_reserved_bytes()
 {
    return sGlobalAlloc->MemReserved();
@@ -7791,3 +7917,18 @@ unsigned int __hxcpp_obj_hash(Dynamic inObj)
 
 
 void DummyFunction(void *inPtr) { }
+// forward declaration
+std::string formatBytes(size_t bytes);
+static const char* hx_format_bytes(size_t bytes)
+{
+   static char strBuf[64];
+   size_t k = (size_t)1024;
+   size_t meg = (size_t)1024 * (size_t)1024;
+   if (bytes<k)
+      snprintf(strBuf,sizeof(strBuf),"%d", (int)bytes);
+   else if (bytes<meg)
+      snprintf(strBuf,sizeof(strBuf),"%.2fk", (double)bytes/(double)k);
+   else
+      snprintf(strBuf,sizeof(strBuf),"%.2fmb", (double)bytes/(double)meg);
+   return strBuf;
+}

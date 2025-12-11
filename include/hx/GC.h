@@ -46,9 +46,12 @@ HXCPP_EXTERN_CLASS_ATTRIBUTES void  __hxcpp_set_minor_base_delta_bytes(int inByt
 HXCPP_EXTERN_CLASS_ATTRIBUTES void  __hxcpp_set_minor_gate_ms(int inMs);
 HXCPP_EXTERN_CLASS_ATTRIBUTES void  __hxcpp_set_minor_start_bytes(int inBytes);
 HXCPP_EXTERN_CLASS_ATTRIBUTES void  __hxcpp_gc_large_refresh_enable(int inEnable);
+HXCPP_EXTERN_CLASS_ATTRIBUTES void  __hxcpp_gc_minor_large_refresh_enable(int inEnable);
 HXCPP_EXTERN_CLASS_ATTRIBUTES int   __hxcpp_get_minor_gate_ms();
 HXCPP_EXTERN_CLASS_ATTRIBUTES int   __hxcpp_get_minor_start_bytes();
 HXCPP_EXTERN_CLASS_ATTRIBUTES int   __hxcpp_gc_get_large_refresh_enabled();
+HXCPP_EXTERN_CLASS_ATTRIBUTES int   __hxcpp_gc_get_large_refresh_enabled();
+HXCPP_EXTERN_CLASS_ATTRIBUTES void  __hxcpp_gc_verify_consistency(int level);
 HXCPP_EXTERN_CLASS_ATTRIBUTES size_t __hxcpp_gc_get_working_memory_size();
 HXCPP_EXTERN_CLASS_ATTRIBUTES int   __hxcpp_gc_get_target_free_space_percentage();
 HXCPP_EXTERN_CLASS_ATTRIBUTES size_t __hxcpp_gc_garbage_estimate();
