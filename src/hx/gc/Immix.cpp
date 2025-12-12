@@ -464,6 +464,8 @@ static int *sThreadArrayMarkCount = sThreadArrayMarkCountData + 1;
 static int sThreadChunkPushCount;
 static int sThreadChunkWakes;
 static int sSpinCount = 0;
+static int sMaxSpinLen1 = 0;
+static int sMaxSpinLen2 = 0;
 static int sThreadZeroWaits = 0;
 static int sThreadZeroPokes = 0;
 static int sThreadBlockZeroCount = 0;
@@ -1008,7 +1010,7 @@ enum ThreadPoolJob
 
 int sgThreadCount = 0;
 static ThreadPoolJob sgThreadPoolJob = tpjNone;
-static bool sgThreadPoolAbort = false;
+static volatile int sgThreadPoolAbort = 0;
 
 // Pthreads enters the sleep state while holding a mutex, so it no cost to update
 //  the sleeping state and thereby avoid over-signalling the condition
@@ -1402,6 +1404,49 @@ struct BlockDataInfo
       int usedBytes = 0;
 
       unsigned char *rowMarked = mPtr->mRowMarked;
+
+      const unsigned char *rmStart = rowMarked + IMMIX_HEADER_LINES;
+      int rmLen = IMMIX_USEFUL_LINES;
+      if (!memchr(rmStart, 1, rmLen))
+      {
+         ranges[0].start  = IMMIX_HEADER_LINES<<IMMIX_LINE_BITS;
+         ranges[0].length = (IMMIX_USEFUL_LINES)<<IMMIX_LINE_BITS;
+         mMaxHoleSize = (IMMIX_USEFUL_LINES)<<IMMIX_LINE_BITS;
+         mUsedRows = 0;
+         mHoles = 1;
+         mMoveScore = 0;
+         ZERO_MEM(allocStart+IMMIX_HEADER_LINES, IMMIX_USEFUL_LINES*sizeof(int));
+         mUsedBytes = FULL ? 0 : 0;
+         mReclaimed = true;
+         if (outStats)
+         {
+            outStats->rowsInUse += 0;
+            outStats->bytesInUse += 0;
+            outStats->fragScore += 0;
+            outStats->fraggedRows += mFraggedRows;
+            outStats->emptyBlocks++;
+         }
+         mFraggedRows = 0;
+         return;
+      }
+      if (!FULL && !memchr(rmStart, 0, rmLen))
+      {
+         mUsedRows = IMMIX_USEFUL_LINES;
+         mUsedBytes = mUsedRows<<IMMIX_LINE_BITS;
+         mHoles = 0;
+         mMaxHoleSize = 0;
+         mMoveScore = 0;
+         mReclaimed = true;
+         if (outStats)
+         {
+            outStats->rowsInUse += mUsedRows;
+            outStats->bytesInUse += mUsedBytes;
+            outStats->fragScore += 0;
+            outStats->fraggedRows += mFraggedRows;
+         }
+         mFraggedRows = 0;
+         return;
+      }
 
       int r = IMMIX_HEADER_LINES;
       // Count unused rows ....
@@ -2069,6 +2114,7 @@ struct GlobalChunks
       {
          #ifdef PROFILE_THREAD_USAGE
          _hx_atomic_add(&sSpinCount, 1);
+         if (spinCounter1 > sMaxSpinLen1) sMaxSpinLen1 = spinCounter1;
          #endif
          if (sSpinBackoffThreshold>0)
          {
@@ -2164,6 +2210,7 @@ struct GlobalChunks
       {
          #ifdef PROFILE_THREAD_USAGE
          _hx_atomic_add(&sSpinCount, 1);
+         if (spinCounter2 > sMaxSpinLen2) sMaxSpinLen2 = spinCounter2;
          #endif
          if (sSpinBackoffThreshold>0)
          {
@@ -3570,6 +3617,8 @@ public:
       mGenerationalRetainEstimate = 0.5;
       mSurvivalRate = 0.1;
       mAllocatedSinceLastGC = 0;
+      mRecycleScanStart = 0;
+      mThreadChunkSize = 1;
       for(int p=0;p<LOCAL_POOL_SIZE;p++)
          mLocalPool[p] = 0;
 
@@ -3686,12 +3735,15 @@ public:
       #endif
       bool isLocked = false;
 
-
       mLargeRecycleLock.Lock();
-      if (largeObjectRecycle.size())
+      int nRecycle = largeObjectRecycle.size();
+      if (nRecycle)
       {
-         for(int i=0;i<largeObjectRecycle.size();i++)
+         int start = nRecycle>0 ? (mRecycleScanStart % nRecycle) : 0;
+         int scanCap = nRecycle > 64 ? 64 : nRecycle;
+         for(int j=0;j<scanCap;j++)
          {
+            int i = (start + j) % nRecycle;
             if ( largeObjectRecycle[i][0] == inSize )
             {
                if (do_lock && !isLocked)
@@ -3704,6 +3756,7 @@ public:
 
                result = largeObjectRecycle[i];
                largeObjectRecycle.qerase(i);
+               mRecycleScanStart = i;
                // You can use this to test race condition
                //Sleep(1);
                break;
@@ -4789,14 +4842,19 @@ public:
    {
       while(!sgThreadPoolAbort)
       {
-         int blockId = _hx_atomic_add(&mThreadJobId, 1);
-         if (blockId>=mAllBlocks.size())
+         int start = _hx_atomic_add(&mThreadJobId, mThreadChunkSize);
+         if (start>=mAllBlocks.size())
             break;
-
+         int end = start + mThreadChunkSize;
+         if (end>mAllBlocks.size()) end = mAllBlocks.size();
          if ( sgThreadPoolJob==tpjReclaimFull)
-            mAllBlocks[blockId]->reclaim<true>(&outStats);
+         {
+            for(int i=start;i<end;i++) mAllBlocks[i]->reclaim<true>(&outStats);
+         }
          else
-            mAllBlocks[blockId]->reclaim<false>(&outStats);
+         {
+            for(int i=start;i<end;i++) mAllBlocks[i]->reclaim<false>(&outStats);
+         }
       }
    }
 
@@ -4804,11 +4862,12 @@ public:
    {
       while(!sgThreadPoolAbort)
       {
-         int blockId = _hx_atomic_add(&mThreadJobId, 1);
-         if (blockId>=mAllBlocks.size())
+         int start = _hx_atomic_add(&mThreadJobId, mThreadChunkSize);
+         if (start>=mAllBlocks.size())
             break;
-
-         mAllBlocks[blockId]->countRows(outStats);
+         int end = start + mThreadChunkSize;
+         if (end>mAllBlocks.size()) end = mAllBlocks.size();
+         for(int i=start;i<end;i++) mAllBlocks[i]->countRows(outStats);
       }
    }
 
@@ -5037,7 +5096,7 @@ public:
       {
          if (inKill)
          {
-            sgThreadPoolAbort = true;
+            sgThreadPoolAbort = 1;
             if (sgThreadPoolJob==tpjAsyncZeroJit)
             {
                ThreadPoolAutoLock l(sThreadPoolLock);
@@ -5062,7 +5121,7 @@ public:
          while(sRunningThreads)
             sThreadJobDone.Wait();
          #endif
-         sgThreadPoolAbort = false;
+         sgThreadPoolAbort = 0;
          sAllThreads = 0;
          sgThreadPoolJob = tpjNone;
          sLazyThreads = 0;
@@ -5092,6 +5151,20 @@ public:
       sgThreadPoolJob = inJob;
 
       sgThreadCount = inThreadLimit<0 ? MAX_GC_THREADS : std::min((int)MAX_GC_THREADS, inThreadLimit) ;
+
+      if (inJob==tpjReclaimFull || inJob==tpjReclaim || inJob==tpjCountRows)
+      {
+         int threads = inThreadLimit<0 ? (int)MAX_GC_THREADS : std::min((int)MAX_GC_THREADS, inThreadLimit);
+         int base = std::max(threads, 1);
+         int chunk = std::max(32, inWorkers / (base*8));
+         if (chunk>256) chunk = 256;
+         if (chunk<1) chunk = 1;
+         mThreadChunkSize = chunk;
+      }
+      else
+      {
+         mThreadChunkSize = 1;
+      }
 
       int start = std::min(inWorkers, sgThreadCount );
 
@@ -5830,7 +5903,8 @@ public:
       GCLOG("Thread chunks:%d, wakes=%d\n", sThreadChunkPushCount, sThreadChunkWakes);
       for(int i=-1;i<MAX_GC_THREADS;i++)
         GCLOG(" thread %d] %d + %d\n", i, sThreadMarkCount[i], sThreadArrayMarkCount[i]);
-      GCLOG("Locking spins  : %d\n", sSpinCount);
+      GCLOG("Locking spins  : %d (max PL:%d FL:%d)\n", sSpinCount, sMaxSpinLen1, sMaxSpinLen2);
+      sMaxSpinLen1 = sMaxSpinLen2 = 0;
       sSpinCount = 0;
       #endif
 
@@ -6094,6 +6168,7 @@ public:
 
    volatile int mNextFreeBlockOfSize[BLOCK_OFSIZE_COUNT];
    volatile int mThreadJobId;
+   volatile int mThreadChunkSize;
 
    BlockList mAllBlocks;
    BlockList mFreeBlocks;
@@ -6103,6 +6178,7 @@ public:
    LargeList mLargeList;
    HxMutex    mLargeListLock;
    HxMutex    mLargeRecycleLock;
+   int        mRecycleScanStart;
    hx::QuickVec<LocalAllocator *> mLocalAllocs;
    LocalAllocator *mLocalPool[LOCAL_POOL_SIZE];
    hx::QuickVec<unsigned int *> largeObjectRecycle;
