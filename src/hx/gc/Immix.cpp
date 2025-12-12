@@ -464,8 +464,6 @@ static int *sThreadArrayMarkCount = sThreadArrayMarkCountData + 1;
 static int sThreadChunkPushCount;
 static int sThreadChunkWakes;
 static int sSpinCount = 0;
-static int sMaxSpinLen1 = 0;
-static int sMaxSpinLen2 = 0;
 static int sThreadZeroWaits = 0;
 static int sThreadZeroPokes = 0;
 static int sThreadBlockZeroCount = 0;
@@ -1010,7 +1008,7 @@ enum ThreadPoolJob
 
 int sgThreadCount = 0;
 static ThreadPoolJob sgThreadPoolJob = tpjNone;
-static volatile int sgThreadPoolAbort = 0;
+static bool sgThreadPoolAbort = false;
 
 // Pthreads enters the sleep state while holding a mutex, so it no cost to update
 //  the sleeping state and thereby avoid over-signalling the condition
@@ -2114,7 +2112,6 @@ struct GlobalChunks
       {
          #ifdef PROFILE_THREAD_USAGE
          _hx_atomic_add(&sSpinCount, 1);
-         if (spinCounter1 > sMaxSpinLen1) sMaxSpinLen1 = spinCounter1;
          #endif
          if (sSpinBackoffThreshold>0)
          {
@@ -2210,7 +2207,6 @@ struct GlobalChunks
       {
          #ifdef PROFILE_THREAD_USAGE
          _hx_atomic_add(&sSpinCount, 1);
-         if (spinCounter2 > sMaxSpinLen2) sMaxSpinLen2 = spinCounter2;
          #endif
          if (sSpinBackoffThreshold>0)
          {
@@ -5096,7 +5092,7 @@ public:
       {
          if (inKill)
          {
-            sgThreadPoolAbort = 1;
+            sgThreadPoolAbort = true;
             if (sgThreadPoolJob==tpjAsyncZeroJit)
             {
                ThreadPoolAutoLock l(sThreadPoolLock);
@@ -5121,7 +5117,7 @@ public:
          while(sRunningThreads)
             sThreadJobDone.Wait();
          #endif
-         sgThreadPoolAbort = 0;
+         sgThreadPoolAbort = false;
          sAllThreads = 0;
          sgThreadPoolJob = tpjNone;
          sLazyThreads = 0;
@@ -5903,8 +5899,7 @@ public:
       GCLOG("Thread chunks:%d, wakes=%d\n", sThreadChunkPushCount, sThreadChunkWakes);
       for(int i=-1;i<MAX_GC_THREADS;i++)
         GCLOG(" thread %d] %d + %d\n", i, sThreadMarkCount[i], sThreadArrayMarkCount[i]);
-      GCLOG("Locking spins  : %d (max PL:%d FL:%d)\n", sSpinCount, sMaxSpinLen1, sMaxSpinLen2);
-      sMaxSpinLen1 = sMaxSpinLen2 = 0;
+      GCLOG("Locking spins  : %d\n", sSpinCount);
       sSpinCount = 0;
       #endif
 
